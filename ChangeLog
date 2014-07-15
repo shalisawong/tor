@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 Changes in version 0.2.6.1-alpha - 2014-??-??
 
 
@@ -304,6 +305,8 @@ Changes in version 0.2.5.5-alpha - 2014-06-18
       hidden services.
 
 
+=======
+>>>>>>> clientlogging
 Changes in version 0.2.4.22 - 2014-05-16
   Tor 0.2.4.22 backports numerous high-priority fixes from the Tor 0.2.5
   alpha release series. These include blocking all authority signing
@@ -395,6 +398,7 @@ Changes in version 0.2.4.22 - 2014-05-16
       0.2.3.18-rc.
 
 
+<<<<<<< HEAD
 Changes in version 0.2.5.4-alpha - 2014-04-25
   Tor 0.2.5.4-alpha includes several security and performance
   improvements for clients and relays, including blacklisting authority
@@ -834,6 +838,8 @@ Changes in version 0.2.5.3-alpha - 2014-03-22
       now just fail, normally. Fixes bug 9004; bugfix on 0.2.2.4-alpha.
 
 
+=======
+>>>>>>> clientlogging
 Changes in version 0.2.4.21 - 2014-02-28
   Tor 0.2.4.21 further improves security against potential adversaries who
   find breaking 1024-bit crypto doable, and backports several stability
@@ -895,6 +901,7 @@ Changes in version 0.2.4.21 - 2014-02-28
       flag set. Fixes bug 10470; bugfix on 0.2.3.3-alpha / 0.2.3.16-alpha.
 
 
+<<<<<<< HEAD
 Changes in version 0.2.5.2-alpha - 2014-02-13
   Tor 0.2.5.2-alpha includes all the fixes from 0.2.4.18-rc and 0.2.4.20,
   like the "poor random number generation" fix and the "building too many
@@ -1224,6 +1231,8 @@ Changes in version 0.2.5.2-alpha - 2014-02-13
       1024-bit is uncomfortably small these days). Addresses ticket 10324.
 
 
+=======
+>>>>>>> clientlogging
 Changes in version 0.2.4.20 - 2013-12-22
   Tor 0.2.4.20 fixes potentially poor random number generation for users
   who 1) use OpenSSL 1.0.0 or later, 2) set "HardwareAccel 1" in their
@@ -1380,6 +1389,7 @@ Changes in version 0.2.4.18-rc - 2013-11-16
       log entries. Resolves ticket 10124.
 
 
+<<<<<<< HEAD
 Changes in version 0.2.5.1-alpha - 2013-10-02
   Tor 0.2.5.1-alpha introduces experimental support for syscall sandboxing
   on Linux, allows bridges that offer pluggable transports to report usage
@@ -1593,6 +1603,8 @@ Changes in version 0.2.5.1-alpha - 2013-10-02
     - Remove contrib/id_to_fp.c since it wasn't used anywhere.
 
 
+=======
+>>>>>>> clientlogging
 Changes in version 0.2.4.17-rc - 2013-09-05
   Tor 0.2.4.17-rc is the third release candidate for the Tor 0.2.4.x
   series. It adds an emergency step to help us tolerate the massive
@@ -2501,7 +2513,7 @@ Changes in version 0.2.4.7-alpha - 2012-12-24
       "FallbackNetworkstatus" option, since we never got it working well
       enough to use it. Closes bug 572.
     - If we have no circuits open, use a relaxed timeout (the
-      95-percentile cutoff) until a circuit succeeds. This heuristic
+      95th-percentile cutoff) until a circuit succeeds. This heuristic
       should allow Tor to succeed at building circuits even when the
       network connection drastically changes. Should help with bug 3443.
 

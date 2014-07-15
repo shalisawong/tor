@@ -232,7 +232,11 @@
 #define USING_TWOS_COMPLEMENT
 
 /* Version number of package */
+<<<<<<< HEAD
 #define VERSION "0.2.6.0-alpha-dev"
+=======
+#define VERSION "0.2.4.22"
+>>>>>>> clientlogging
 
 
 

@@ -8,7 +8,11 @@
 !include "LogicLib.nsh"
 !include "FileFunc.nsh"
 !insertmacro GetParameters
+<<<<<<< HEAD:contrib/win32build/tor-mingw.nsi.in
 !define VERSION "0.2.6.0-alpha-dev"
+=======
+!define VERSION "0.2.4.22"
+>>>>>>> clientlogging:contrib/tor-mingw.nsi.in
 !define INSTALLER "tor-${VERSION}-win32.exe"
 !define WEBSITE "https://www.torproject.org/"
 !define LICENSE "LICENSE"

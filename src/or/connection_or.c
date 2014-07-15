@@ -907,6 +907,7 @@ connection_or_init_conn_from_address(or_connection_t *conn,
     conn->nickname = tor_strdup(node_get_nickname(r));
     tor_free(conn->base_.address);
     conn->base_.address = tor_dup_addr(&node_ap.addr);
+
   } else {
     const char *n;
     /* If we're an authoritative directory server, we may know a

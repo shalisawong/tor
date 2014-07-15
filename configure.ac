@@ -3,7 +3,11 @@ dnl Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson
 dnl Copyright (c) 2007-2013, The Tor Project, Inc.
 dnl See LICENSE for licensing information
 
+<<<<<<< HEAD
 AC_INIT([tor],[0.2.6.0-alpha-dev])
+=======
+AC_INIT([tor],[0.2.4.22])
+>>>>>>> clientlogging
 AC_CONFIG_SRCDIR([src/or/main.c])
 AC_CONFIG_MACRO_DIR([m4])
 AM_INIT_AUTOMAKE

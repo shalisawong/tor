@@ -41,6 +41,12 @@
 struct global_circuitlist_s global_circuitlist =
   TOR_LIST_HEAD_INITIALIZER(global_circuitlist);
 
+/** CLIENTLOGGING:
+ *  A unique identifier for circuits that might be logged by client logging
+ *  code.
+ */
+uint64_t cllog_next_circ_id ;
+
 /** A list of all the circuits in CIRCUIT_STATE_CHAN_WAIT. */
 static smartlist_t *circuits_pending_chans = NULL;
 
@@ -718,13 +724,23 @@ or_circuit_new(circid_t p_circ_id, channel_t *p_chan)
   circ = tor_malloc_zero(sizeof(or_circuit_t));
   circ->base_.magic = OR_CIRCUIT_MAGIC;
 
-  if (p_chan)
+  if (p_chan) {
     circuit_set_p_circid_chan(circ, p_circ_id, p_chan);
+  }
 
   circ->remaining_relay_early_cells = MAX_RELAY_EARLY_CELLS_PER_CIRCUIT;
   cell_queue_init(&circ->p_chan_cells);
 
   init_circuit_base(TO_CIRCUIT(circ));
+
+
+  /* CLIENTLOGGING:
+   * psuedonymizing circuit ids 
+   */
+  if (p_chan->cllog_is_likely_op) {
+      (TO_CIRCUIT(circ))->cllog_circ_id = cllog_next_circ_id ;
+      cllog_next_circ_id++ ;
+  }
 
   return circ;
 }
