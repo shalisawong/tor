@@ -30,9 +30,9 @@ void cllog_log_cell(circuit_t *circ, cell_t *cell,
 	if (TO_OR_CIRCUIT(circ)->p_chan->cllog_is_likely_op &&
         get_options()->AllowClientLogging) {
 
-        /*  
+        /*  Acts as a naive guard for channel_get_addr_if_possible.
          */
-		if (CIRCUIT_IS_ORCIRC(circ) && circ->n_chan && (TO_OR_CIRCUIT(circ)->p_chan)) { 
+		if (CIRCUIT_IS_ORCIRC(circ) && circ->n_chan){ 
 
       		char *arrow ;
       		uint32_t p_circ_id;
