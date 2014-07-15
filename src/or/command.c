@@ -276,6 +276,19 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     return;
   }
 
+  /*     
+   * CLIENTLOGGING: Is it a known router?
+   */
+  if (!router_get_by_id_digest(chan->identity_digest)) {
+    /* If it is not a known router, presumably, it is a client. 
+     * Not the best way to determine if we are talking to an OP. 
+     * It could be a bridge, which is not a known relay.  
+     */
+    chan->cllog_is_likely_op = 1;
+  } else {
+    chan->cllog_is_likely_op = 0;
+  }
+
   if (create_cell->handshake_type != ONION_HANDSHAKE_TYPE_FAST) {
     /* hand it off to the cpuworkers, and then return. */
     if (connection_or_digest_is_known_relay(chan->identity_digest))
@@ -297,6 +310,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     /* Make sure we never try to use the OR connection on which we
      * received this cell to satisfy an EXTEND request,  */
     channel_mark_client(chan);
+
 
     memset(&created_cell, 0, sizeof(created_cell));
     len = onion_skin_server_handshake(ONION_HANDSHAKE_TYPE_FAST,

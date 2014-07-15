@@ -2369,6 +2369,7 @@ channel_do_open_actions(channel_t *chan)
       not_using = 1;
     }
     router_set_status(chan->identity_digest, 1);
+
   } else {
     /* only report it to the geoip module if it's not a known router */
     if (!router_get_by_id_digest(chan->identity_digest)) {
@@ -2377,7 +2378,7 @@ channel_do_open_actions(channel_t *chan)
                                now);
       }
       /* Otherwise the underlying transport can't tell us this, so skip it */
-    }
+    } 
   }
 
   if (!not_using) circuit_n_chan_done(chan, 1);
@@ -3599,6 +3600,7 @@ channel_mark_client(channel_t *chan)
   tor_assert(chan);
 
   chan->is_client = 1;
+
 }
 
 /**
