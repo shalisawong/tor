@@ -2508,6 +2508,10 @@ connection_consider_empty_read_buckets(connection_t *conn)
 {
   const char *reason;
 
+  /* CLIENTLOGGING: Fix for infinate loop in Shadow */ 
+//  if (!connection_is_rate_limited(conn))
+//	return; /* Always okay. */
+
   if (global_read_bucket <= 0) {
     reason = "global read bucket exhausted. Pausing.";
   } else if (connection_counts_as_relayed_traffic(conn, approx_time()) &&
@@ -2534,6 +2538,10 @@ static void
 connection_consider_empty_write_buckets(connection_t *conn)
 {
   const char *reason;
+
+  /* CLIENTLOGGING: Fix for infinate loop in Shadow */ 
+//  if (!connection_is_rate_limited(conn))
+//	return; /* Always okay. */
 
   if (global_write_bucket <= 0) {
     reason = "global write bucket exhausted. Pausing.";

@@ -804,7 +804,7 @@ typedef struct rend_data_t {
 /** Used to indicate which way a cell is going on a circuit. */
 typedef enum {
   CELL_DIRECTION_IN=1, /**< The cell is moving towards the origin. */
-  CELL_DIRECTION_OUT=2, /**< The cell is moving away from the origin. */
+  CELL_DIRECTION_OUT=2 /**< The cell is moving away from the origin. */,
 } cell_direction_t;
 
 /** Initial value for both sides of a circuit transmission window when the

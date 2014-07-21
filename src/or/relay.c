@@ -238,7 +238,7 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
 
     /* CLIENTLOGGING: log things going OUT
      */
-	cllog_log_cell(circ, cell, cell_direction);
+	cllog_log_cell(circ, cell, cell_direction, CELL_RELAY);
 
     cell->circ_id = circ->n_circ_id; /* switch it */
     chan = circ->n_chan;
@@ -246,7 +246,7 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
 
 	/* CLIENTLOGGING: log things going IN
      */
-	cllog_log_cell(circ, cell, cell_direction);
+	cllog_log_cell(circ, cell, cell_direction, CELL_RELAY);
 
     cell->circ_id = TO_OR_CIRCUIT(circ)->p_circ_id; /* switch it */
     chan = TO_OR_CIRCUIT(circ)->p_chan;

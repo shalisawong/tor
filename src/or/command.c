@@ -20,6 +20,10 @@
 #include "channel.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
+
+/*CLIENTLOGGING */
+#include "clientlogging.h"
+
 #include "command.h"
 #include "connection.h"
 #include "connection_or.h"
@@ -289,6 +293,9 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     chan->cllog_is_likely_op = 0;
   }
 
+  /* CLIENTLOGGING: log CELL_CREATE cell*/
+  cllog_log_cell(TO_CIRCUIT(circ), cell, CELL_DIRECTION_OUT, CELL_CREATE);
+
   if (create_cell->handshake_type != ONION_HANDSHAKE_TYPE_FAST) {
     /* hand it off to the cpuworkers, and then return. */
     if (connection_or_digest_is_known_relay(chan->identity_digest))
@@ -337,7 +344,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
       return;
     }
     memwipe(keys, 0, sizeof(keys));
-  }
+  };
 }
 
 /** Process a 'created' <b>cell</b> that just arrived from <b>chan</b>.
@@ -412,7 +419,7 @@ command_process_created_cell(cell_t *cell, channel_t *chan)
 
     relay_send_command_from_edge(0, circ, command,
                                  (const char*)payload, len, NULL);
-  }
+  };
 }
 
 /** Process a 'relay' or 'relay_early' <b>cell</b> that just arrived from
@@ -511,14 +518,19 @@ command_process_destroy_cell(cell_t *cell, channel_t *chan)
     return;
   }
   log_debug(LD_OR,"Received for circID %u.",(unsigned)cell->circ_id);
-
+  
   reason = (uint8_t)cell->payload[0];
 
   if (!CIRCUIT_IS_ORIGIN(circ) &&
-      cell->circ_id == TO_OR_CIRCUIT(circ)->p_circ_id) {
+    cell->circ_id == TO_OR_CIRCUIT(circ)->p_circ_id) {
     /* the destroy came from behind */
+  
+  /* CLIENTLOGGING: log CELL_DESTROY cell */ 
+    cllog_log_cell(circ, cell, CELL_DIRECTION_OUT, CELL_DESTROY);
+
     circuit_set_p_circid_chan(TO_OR_CIRCUIT(circ), 0, NULL);
     circuit_mark_for_close(circ, reason|END_CIRC_REASON_FLAG_REMOTE);
+
   } else { /* the destroy came from ahead */
     circuit_set_n_circid_chan(circ, 0, NULL);
     if (CIRCUIT_IS_ORIGIN(circ)) {
