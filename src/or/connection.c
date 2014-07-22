@@ -2509,7 +2509,7 @@ connection_consider_empty_read_buckets(connection_t *conn)
   const char *reason;
 
   /* CLIENTLOGGING: Fix for infinate loop in Shadow */ 
-//  if (!connection_is_rate_limited(conn))
+//  if (conn->type == CONN_TYPE_CPUWORKER)
 //	return; /* Always okay. */
 
   if (global_read_bucket <= 0) {
@@ -2540,7 +2540,7 @@ connection_consider_empty_write_buckets(connection_t *conn)
   const char *reason;
 
   /* CLIENTLOGGING: Fix for infinate loop in Shadow */ 
-//  if (!connection_is_rate_limited(conn))
+//  if (conn->type == CONN_TYPE_CPUWORKER)
 //	return; /* Always okay. */
 
   if (global_write_bucket <= 0) {

@@ -46,17 +46,17 @@ void cllog_log_cell(circuit_t *circ, cell_t *cell,
                
 		if (command == CELL_CREATE) {
                 	log_notice(LD_CLIENTLOGGING,
-                                   "CLIENTLOGGING: COMMAND %d %s (%u) CIRC %" PRIx64 "",
-                                   command, p_addr_s, cell->circ_id, 
+                                   "CLIENTLOGGING: CREATE %s (%u) CIRC %" PRIx64 "",
+                                   p_addr_s, cell->circ_id, 
                                    circ->cllog_circ_id) ;
 
 		} else if (command == CELL_DESTROY) {
 			channel_get_addr_if_possible(circ->n_chan, &n_chan_addr);
 			tor_addr_to_str(n_addr_s, &n_chan_addr, TOR_ADDR_BUF_LEN, 0);
 	                log_notice(LD_CLIENTLOGGING,
-        	                   "CLIENTLOGGING: COMMAND %d %s %s %s (%u %s %u) CIRC %" PRIx64 "",
-              	                   command, p_addr_s, arrow, n_addr_s,
-			       	   cell->circ_id, arrow, circ->n_circ_id,
+        	                   "CLIENTLOGGING: DESTROY %s %s %s (%u %s %u) CIRC %" PRIx64 "",
+              	                   p_addr_s, arrow, n_addr_s,
+			       	   			   cell->circ_id, arrow, circ->n_circ_id,
                               	   circ->cllog_circ_id) ;
 
 		}
@@ -95,8 +95,8 @@ void cllog_log_cell(circuit_t *circ, cell_t *cell,
     		} 
 
        		log_notice(LD_CLIENTLOGGING, 
-		 		"CLIENTLOGGING: COMMAND %d %s %s %s (%u %s %u) CIRC %" PRIx64 "", 
-		 		command, p_addr_s, arrow, n_addr_s, 
+		 		"CLIENTLOGGING: RELAY %s %s %s (%u %s %u) CIRC %" PRIx64 "", 
+		 		p_addr_s, arrow, n_addr_s, 
 		 		p_circ_id, arrow, n_circ_id,
 		 		circ->cllog_circ_id) ;
    			
