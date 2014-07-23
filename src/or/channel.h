@@ -172,6 +172,12 @@ struct channel_s {
    * to satisfy an EXTEND request.  */
   unsigned int is_client:1;
 
+  /** CLIENTLOGGING:
+   *  True if it is likely that the other end of this connection is
+   *  a client.  This is used by the client logging code.
+   */
+  unsigned int cllog_is_likely_op:1;
+
   /** Set if the channel was initiated remotely (came from a listener) */
   unsigned int is_incoming:1;
 
