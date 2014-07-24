@@ -44,7 +44,7 @@ struct global_circuitlist_s global_circuitlist =
  *  A unique identifier for circuits that might be logged by client logging
  *  code.
  */
-uint64_t cllog_next_circ_id ;
+uint64_t cllog_next_circ_id = 1;
 
 /** A list of all the circuits in CIRCUIT_STATE_CHAN_WAIT. */
 static smartlist_t *circuits_pending_chans = NULL;
@@ -709,12 +709,12 @@ or_circuit_new(circid_t p_circ_id, channel_t *p_chan)
   init_circuit_base(TO_CIRCUIT(circ));
 
   /* CLIENTLOGGING:
-   * psuedonymizing circuit ids 
+   * psuedonymizing circuit ids: starts at 1. 
    */
   if (p_chan->cllog_is_likely_op) {
       (TO_CIRCUIT(circ))->cllog_circ_id = cllog_next_circ_id ;
       cllog_next_circ_id++ ;
-  }
+  } 
 
   return circ;
 }

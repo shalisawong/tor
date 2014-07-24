@@ -551,7 +551,6 @@ command_process_destroy_cell(cell_t *cell, channel_t *chan)
   if (!CIRCUIT_IS_ORIGIN(circ) &&
       cell->circ_id == TO_OR_CIRCUIT(circ)->p_circ_id) {
     /* the destroy came from behind */
-
     /* CLIENTLOGGING: log CELL_DESTROY cell */
     cllog_log_cell(circ, cell, CELL_DIRECTION_OUT, CELL_DESTROY);
 

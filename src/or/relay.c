@@ -19,6 +19,10 @@
 #include "circuitbuild.h"
 #include "circuitlist.h"
 #include "circuituse.h"
+
+/*CLIENTLOGGING */
+#include "clientlogging.h"
+
 #include "config.h"
 #include "connection.h"
 #include "connection_edge.h"
