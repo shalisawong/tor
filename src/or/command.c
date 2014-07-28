@@ -320,9 +320,6 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     chan->cllog_is_likely_op = 0;
   }
 
-  /* CLIENTLOGGING: log CELL_CREATE cell*/
-  cllog_log_cell(TO_CIRCUIT(circ), cell, CELL_DIRECTION_OUT, CELL_CREATE);
-
   if (create_cell->handshake_type != ONION_HANDSHAKE_TYPE_FAST) {
     /* hand it off to the cpuworkers, and then return. */
     if (connection_or_digest_is_known_relay(chan->identity_digest))
@@ -333,6 +330,11 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
       return;
     }
     log_debug(LD_OR,"success: handed off onionskin.");
+
+
+  /* CLIENTLOGGING: log CELL_CREATE cell*/
+   // cllog_log_cell(TO_CIRCUIT(circ), cell, CELL_DIRECTION_OUT, CELL_CREATE);
+
   } else {
     /* This is a CREATE_FAST cell; we can handle it immediately without using
      * a CPU worker. */
@@ -427,6 +429,14 @@ command_process_created_cell(cell_t *cell, channel_t *chan)
       return;
     }
   } else { /* pack it into an extended relay cell, and send it. */
+
+    /*
+     *  CLIENTLOGGING: log CREATED cell??? Under else because we don't want it 
+     *  to be an OP.
+     */
+    cllog_log_cell(circ, cell, CELL_DIRECTION_OUT, CELL_CREATED);
+
+
     uint8_t command=0;
     uint16_t len=0;
     uint8_t payload[RELAY_PAYLOAD_SIZE];
