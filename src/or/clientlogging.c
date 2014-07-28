@@ -19,90 +19,74 @@
 void cllog_log_cell(circuit_t *circ, cell_t *cell, 
 					cell_direction_t cell_direction, uint8_t command) {
 	
-    tor_assert(circ);
-    tor_assert(cell);
-    tor_assert(cell_direction == CELL_DIRECTION_IN ||
-               cell_direction == CELL_DIRECTION_OUT); 
-    tor_assert(command == CELL_DESTROY || command == CELL_RELAY || command == CELL_CREATED);
-
-    /* If the previous channel is a client (cllog_is_likely_op = 1),
-     * and if clientlogging is on, log the cell.
-     */
-    if (!(CIRCUIT_IS_ORCIRC(circ)) || (circ->cllog_circ_id == 0) || 
-	!(get_options()->AllowClientLogging)) {
-	return;
-    }
-
-    tor_assert(circ->cllog_circ_id > 0);
+	tor_assert(circ);
+	tor_assert(cell);
+	tor_assert(cell_direction == CELL_DIRECTION_IN ||
+			cell_direction == CELL_DIRECTION_OUT); 
+	tor_assert(command == CELL_DESTROY || command == CELL_RELAY 
+			|| command == CELL_CREATED);
+	
+	/* If the previous channel is a client (cllog_is_likely_op = 1),
+	 * and if clientlogging is on, log the cell. 
+	 * circ->n_chan acts as a naive guard for channel_get_addr_if_possible
+	 */
+	
+	if (!(CIRCUIT_IS_ORCIRC(circ)) || (circ->cllog_circ_id == 0) || 
+			!(get_options()->AllowClientLogging) || !(circ->n_chan)) {
+		return;
+	}
+	
+	tor_assert(circ->cllog_circ_id > 0);
 			 
-    char *arrow;
-    char *log_command;
-    uint32_t p_circ_id;
-    uint32_t n_circ_id;
-    tor_addr_t n_chan_addr;
-    tor_addr_t p_chan_addr;
-    char n_addr_s[TOR_ADDR_BUF_LEN] ;
-    char p_addr_s[TOR_ADDR_BUF_LEN] ; 
+	char *arrow;
+	char *log_command;
+	uint32_t p_circ_id;
+	uint32_t n_circ_id;
+	tor_addr_t n_chan_addr;
+	tor_addr_t p_chan_addr;
+	char n_addr_s[TOR_ADDR_BUF_LEN] ;
+	char p_addr_s[TOR_ADDR_BUF_LEN] ; 
 
-   /*  Acts as a naive guard for channel_get_addr_if_possible.
-    */
-    if (circ->n_chan) { // || command == CELL_CREATE) {
+    	//if (circ->n_chan) { 
 
-       /* Get the IP addresses of the previous channel that sent and next channel
-        * that will receive the cell we are logging.
-        * Of course, this has to be eliminated later.
-        */
+	/* Get the IP addresses of the previous channel that sent and next channel
+	 * that will receive the cell we are logging.
+	 * Of course, this has to be eliminated later.
+	 */
+	
 	channel_get_addr_if_possible(TO_OR_CIRCUIT(circ)->p_chan, &p_chan_addr);
-      	tor_addr_to_str(p_addr_s, &p_chan_addr, TOR_ADDR_BUF_LEN, 0) ;
-
-/*
-	if (command == CELL_CREATE) {
-		
-		if (command == CELL_CREATE) {
-			log_command = "CREATE" ;
-		} else if (command == CELL_CREATED) {
-			log_command = "CREATED" ;
-		}
-
-
-		//  No n_chan for CREATE?
-		 
-		log_notice(LD_CLIENTLOGGING,
-			"CLIENTLOGGING: %s %s (%u) CIRC %" PRIx64 "",
-			log_command, p_addr_s, cell->circ_id, 
-			circ->cllog_circ_id) ;
-
-	} else {
-*/
-         	/* Determine which direction the cell is going in
-            	* and find the previous and next circuit ids.
-            	*/
-    		if (cell_direction == CELL_DIRECTION_OUT) {
-			arrow = "->";
-			p_circ_id = cell->circ_id;
-			n_circ_id = circ->n_circ_id;
+	tor_addr_to_str(p_addr_s, &p_chan_addr, TOR_ADDR_BUF_LEN, 0) ;
+	
+	/* Determine which direction the cell is going in
+	 * and find the previous and next circuit ids.
+	 */
+	if (cell_direction == CELL_DIRECTION_OUT) {
+		arrow = "->";
+		p_circ_id = cell->circ_id;
+		n_circ_id = circ->n_circ_id;
 				
-      		} else if (cell_direction == CELL_DIRECTION_IN) {
-			arrow = "<-" ;
-			p_circ_id = TO_OR_CIRCUIT(circ)->p_circ_id;
-			n_circ_id = cell->circ_id;
-    		} 
+    	} else if (cell_direction == CELL_DIRECTION_IN) {
+		arrow = "<-" ;
+		p_circ_id = TO_OR_CIRCUIT(circ)->p_circ_id;
+		n_circ_id = cell->circ_id;
+    	} 
 			
-		if (command == CELL_DESTROY) {
-			log_command = "DESTROY" ;
-		} else if (command == CELL_RELAY) {
-			log_command = "RELAY" ;
-		} else if (command == CELL_CREATED) {
-			log_command = "CREATED" ;
-		}
+    	if (command == CELL_DESTROY) {
+		log_command = "DESTROY" ;
+    	} else if (command == CELL_RELAY) {
+		log_command = "RELAY" ;
+	} else if (command == CELL_CREATED) {
+		log_command = "CREATED" ;
+	}
 
-		channel_get_addr_if_possible(circ->n_chan, &n_chan_addr);
-		tor_addr_to_str(n_addr_s, &n_chan_addr, TOR_ADDR_BUF_LEN, 0);
-
-	        log_notice(LD_CLIENTLOGGING,
-			"CLIENTLOGGING: %s %s %s %s (%u %s %u) CIRC %" PRIx64 "",
+	channel_get_addr_if_possible(circ->n_chan, &n_chan_addr);
+	tor_addr_to_str(n_addr_s, &n_chan_addr, TOR_ADDR_BUF_LEN, 0);
+	
+	// For now, don't log the real circ_ids 
+	log_notice(LD_CLIENTLOGGING,
+			"CLIENTLOGGING: %s %s %s %s CIRC %" PRIx64 "",
 			log_command, p_addr_s, arrow, n_addr_s,
-			p_circ_id, arrow, n_circ_id,
+		//	p_circ_id, arrow, n_circ_id,
 			circ->cllog_circ_id) ;
   
 
