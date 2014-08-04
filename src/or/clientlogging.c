@@ -1,6 +1,7 @@
-#include <sys/time.h>
-
-#include "stdint.h"
+/*  
+ *  Shalisa Pattarawuttiwong 
+ *  Last Modified: 08/04/2014
+ */
 
 #include "address.h"
 #include "or.h"
@@ -11,20 +12,18 @@
  *  Given a cell and circuit, logs the previous and next channel ip addresses
  *  and circuit ids in the form: 
  *  	CLIENTLOGGING: previous_ip_addr (direction of cell) next_ip_addr 
- *                    (previous_circ_id (direction of cell) next_circ_id)
  *                     CIRC pseudonymized_circ_id 
- *  with direction of cell represented by an arrow symbol: In = "<-", Out = "->".
- *  CELL_CREATE 1, CELL_CREATED 2, CELL_RELAY 3, CELL_DESTROY 4 
+ *  with direction of cell represented by an arrow symbol: In = "<-", Out = "->". 
  */
 void cllog_log_cell(circuit_t *circ, cell_t *cell, 
-					cell_direction_t cell_direction, uint8_t command) {
+			cell_direction_t cell_direction, uint8_t command) {
 	
 	tor_assert(circ);
 	tor_assert(cell);
 	tor_assert(cell_direction == CELL_DIRECTION_IN ||
 			cell_direction == CELL_DIRECTION_OUT); 
 	tor_assert(command == CELL_DESTROY || command == CELL_RELAY 
-			|| command == CELL_CREATED);
+			|| command == CELL_CREATE);
 	
 	/* If the previous channel is a client (cllog_is_likely_op = 1),
 	 * and if clientlogging is on, log the cell. 
@@ -36,6 +35,7 @@ void cllog_log_cell(circuit_t *circ, cell_t *cell,
 		return;
 	}
 	
+	/* Assure that that previous channel is a client (cllog_circ_id > 0)  */
 	tor_assert(circ->cllog_circ_id > 0);
 			 
 	char *arrow;
@@ -46,8 +46,6 @@ void cllog_log_cell(circuit_t *circ, cell_t *cell,
 	tor_addr_t p_chan_addr;
 	char n_addr_s[TOR_ADDR_BUF_LEN] ;
 	char p_addr_s[TOR_ADDR_BUF_LEN] ; 
-
-    	//if (circ->n_chan) { 
 
 	/* Get the IP addresses of the previous channel that sent and next channel
 	 * that will receive the cell we are logging.
@@ -60,7 +58,6 @@ void cllog_log_cell(circuit_t *circ, cell_t *cell,
 	tor_addr_to_str(p_addr_s, &p_chan_addr, TOR_ADDR_BUF_LEN, 0) ;
 	tor_addr_to_str(n_addr_s, &n_chan_addr, TOR_ADDR_BUF_LEN, 0);
 	
-
 	
 	/* Determine which direction the cell is going in
 	 * and find the previous and next circuit ids.
@@ -70,18 +67,18 @@ void cllog_log_cell(circuit_t *circ, cell_t *cell,
 	//	p_circ_id = cell->circ_id;
 	//	n_circ_id = circ->n_circ_id;
 				
-    	} else if (cell_direction == CELL_DIRECTION_IN) {
+    } else if (cell_direction == CELL_DIRECTION_IN) {
 		arrow = "<-" ;
 	//	p_circ_id = TO_OR_CIRCUIT(circ)->p_circ_id;
 	//	n_circ_id = cell->circ_id;
-    	} 
-			
-    	if (command == CELL_DESTROY) {
+    } 
+	
+	if (command == CELL_DESTROY) {
 		log_command = "DESTROY" ;
-    	} else if (command == CELL_RELAY) {
+    } else if (command == CELL_RELAY) {
 		log_command = "RELAY" ;
-	} else if (command == CELL_CREATED) {
-		log_command = "CREATED" ;
+	} else if (command == CELL_CREATE) {
+		log_command = "CREATE" ;
 	}
 
 	// For now, don't log the real circ_ids 

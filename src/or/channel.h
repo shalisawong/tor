@@ -174,7 +174,7 @@ struct channel_s {
 
   /** CLIENTLOGGING:
    *  True if it is likely that the other end of this connection is
-   *  a client.  This is used by the client logging code.
+   *  a client.  This is used by the clientlogging code.
    */
   unsigned int cllog_is_likely_op:1;
 

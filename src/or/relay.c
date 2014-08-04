@@ -240,14 +240,14 @@ circuit_receive_relay_cell(cell_t *cell, circuit_t *circ,
 
   /* not recognized. pass it on. */
   if (cell_direction == CELL_DIRECTION_OUT) {
-    /* CLIENTLOGGING: log things going OUT
+    /* CLIENTLOGGING: log cells going OUT 
      */
     cllog_log_cell(circ, cell, cell_direction, CELL_RELAY);
 
     cell->circ_id = circ->n_circ_id; /* switch it */
     chan = circ->n_chan;
   } else if (! CIRCUIT_IS_ORIGIN(circ)) {
-    /* CLIENTLOGGING: log things going IN
+    /* CLIENTLOGGING: log cells going IN
      */
     cllog_log_cell(circ, cell, cell_direction, CELL_RELAY);
 

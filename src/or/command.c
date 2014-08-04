@@ -331,10 +331,6 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     }
     log_debug(LD_OR,"success: handed off onionskin.");
 
-
-  /* CLIENTLOGGING: log CELL_CREATE cell*/
-   // cllog_log_cell(TO_CIRCUIT(circ), cell, CELL_DIRECTION_OUT, CELL_CREATE);
-
   } else {
     /* This is a CREATE_FAST cell; we can handle it immediately without using
      * a CPU worker. */
@@ -431,10 +427,10 @@ command_process_created_cell(cell_t *cell, channel_t *chan)
   } else { /* pack it into an extended relay cell, and send it. */
 
     /*
-     *  CLIENTLOGGING: log CREATED cell??? Under else because we don't want it 
+     *  CLIENTLOGGING: log CREATE. Under else because we don't want it 
      *  to be an OP.
      */
-    cllog_log_cell(circ, cell, CELL_DIRECTION_OUT, CELL_CREATED);
+    cllog_log_cell(circ, cell, CELL_DIRECTION_OUT, CELL_CREATE);
 
 
     uint8_t command=0;

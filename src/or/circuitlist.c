@@ -41,7 +41,7 @@ struct global_circuitlist_s global_circuitlist =
   TOR_LIST_HEAD_INITIALIZER(global_circuitlist);
 
 /** CLIENTLOGGING:
- *  A unique identifier for circuits that might be logged by client logging
+ *  A unique identifier for circuits that might be logged by clientlogging
  *  code.
  */
 uint64_t cllog_next_circ_id = 1;
