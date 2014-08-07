@@ -338,28 +338,6 @@ bench_dmap(void)
 }
 
 static void
-bench_siphash(void)
-{
-  char buf[128];
-  int lens[] = { 7, 8, 15, 16, 20, 32, 111, 128, -1 };
-  int i, j;
-  uint64_t start, end;
-  const int N = 300000;
-  crypto_rand(buf, sizeof(buf));
-
-  for (i = 0; lens[i] > 0; ++i) {
-    reset_perftime();
-    start = perftime();
-    for (j = 0; j < N; ++j) {
-      siphash24g(buf, lens[i]);
-    }
-    end = perftime();
-    printf("siphash24g(%d): %.2f ns per call\n",
-           lens[i], NANOCOUNT(start,end,N));
-  }
-}
-
-static void
 bench_cell_ops(void)
 {
   const int iters = 1<<16;
@@ -509,7 +487,6 @@ typedef struct benchmark_t {
 
 static struct benchmark_t benchmarks[] = {
   ENT(dmap),
-  ENT(siphash),
   ENT(aes),
   ENT(onion_TAP),
 #ifdef CURVE25519_ENABLED
@@ -567,7 +544,6 @@ main(int argc, const char **argv)
   reset_perftime();
 
   crypto_seed_rng(1);
-  crypto_init_siphash_key();
   options = options_new();
   init_logging();
   options->command = CMD_RUN_UNITTESTS;

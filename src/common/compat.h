@@ -56,6 +56,21 @@
 #include <stdio.h>
 #include <errno.h>
 
+#if defined (WINCE)
+#include <fcntl.h>
+#include <io.h>
+#include <math.h>
+#include <projects.h>
+/* this is not exported as W .... */
+#define SHGetPathFromIDListW SHGetPathFromIDList
+/* wcecompat has vasprintf */
+#define HAVE_VASPRINTF
+/* no service here */
+#ifdef NT_SERVICE
+#undef NT_SERVICE
+#endif
+#endif // WINCE
+
 #ifndef NULL_REP_IS_ZERO_BYTES
 #error "It seems your platform does not represent NULL as zero. We can't cope."
 #endif
@@ -154,7 +169,6 @@ extern INLINE double U64_TO_DBL(uint64_t x) {
  *
  * #define ATTR_NONNULL(x) __attribute__((nonnull x)) */
 #define ATTR_NONNULL(x)
-#define ATTR_UNUSED __attribute__ ((unused))
 
 /** Macro: Evaluates to <b>exp</b> and hints the compiler that the value
  * of <b>exp</b> will probably be true.
@@ -178,7 +192,6 @@ extern INLINE double U64_TO_DBL(uint64_t x) {
 #define ATTR_MALLOC
 #define ATTR_NORETURN
 #define ATTR_NONNULL(x)
-#define ATTR_UNUSED
 #define PREDICT_LIKELY(exp) (exp)
 #define PREDICT_UNLIKELY(exp) (exp)
 #endif
@@ -277,7 +290,7 @@ typedef struct tor_mmap_t {
 } tor_mmap_t;
 
 tor_mmap_t *tor_mmap_file(const char *filename) ATTR_NONNULL((1));
-int tor_munmap_file(tor_mmap_t *handle) ATTR_NONNULL((1));
+void tor_munmap_file(tor_mmap_t *handle) ATTR_NONNULL((1));
 
 int tor_snprintf(char *str, size_t size, const char *format, ...)
   CHECK_PRINTF(3,4) ATTR_NONNULL((1,3));
@@ -306,7 +319,7 @@ tor_memstr(const void *haystack, size_t hlen, const char *needle)
   extern const uint32_t TOR_##name##_TABLE[];                           \
   static INLINE int TOR_##name(char c) {                                \
     uint8_t u = c;                                                      \
-    return !!(TOR_##name##_TABLE[(u >> 5) & 7] & (1u << (u & 31)));     \
+    return !!(TOR_##name##_TABLE[(u >> 5) & 7] & (1 << (u & 31)));      \
   }
 DECLARE_CTYPE_FN(ISALPHA)
 DECLARE_CTYPE_FN(ISALNUM)
@@ -395,7 +408,6 @@ struct tm *tor_gmtime_r(const time_t *timep, struct tm *result);
 /* ===== File compatibility */
 int tor_open_cloexec(const char *path, int flags, unsigned mode);
 FILE *tor_fopen_cloexec(const char *path, const char *mode);
-int tor_rename(const char *path_old, const char *path_new);
 
 int replace_file(const char *from, const char *to);
 int touch_file(const char *fname);
@@ -618,27 +630,23 @@ int switch_id(const char *user);
 char *get_user_homedir(const char *username);
 #endif
 
-#ifndef _WIN32
-const struct passwd *tor_getpwnam(const char *username);
-const struct passwd *tor_getpwuid(uid_t uid);
-#endif
-
 int get_parent_directory(char *fname);
 char *make_path_absolute(char *fname);
 
 char **get_environment(void);
 
-int get_total_system_memory(size_t *mem_out);
-
 int spawn_func(void (*func)(void *), void *data);
 void spawn_exit(void) ATTR_NORETURN;
 
-#if defined(_WIN32)
+#if defined(ENABLE_THREADS) && defined(_WIN32)
 #define USE_WIN32_THREADS
-#elif defined(HAVE_PTHREAD_H) && defined(HAVE_PTHREAD_CREATE)
+#define TOR_IS_MULTITHREADED 1
+#elif (defined(ENABLE_THREADS) && defined(HAVE_PTHREAD_H) && \
+       defined(HAVE_PTHREAD_CREATE))
 #define USE_PTHREADS
+#define TOR_IS_MULTITHREADED 1
 #else
-#error "No threading system was found"
+#undef TOR_IS_MULTITHREADED
 #endif
 
 int compute_num_cpus(void);
@@ -664,6 +672,7 @@ typedef struct tor_mutex_t {
 
 int tor_mlockall(void);
 
+#ifdef TOR_IS_MULTITHREADED
 tor_mutex_t *tor_mutex_new(void);
 void tor_mutex_init(tor_mutex_t *m);
 void tor_mutex_acquire(tor_mutex_t *m);
@@ -672,10 +681,21 @@ void tor_mutex_free(tor_mutex_t *m);
 void tor_mutex_uninit(tor_mutex_t *m);
 unsigned long tor_get_thread_id(void);
 void tor_threads_init(void);
+#else
+#define tor_mutex_new() ((tor_mutex_t*)tor_malloc(sizeof(int)))
+#define tor_mutex_init(m) STMT_NIL
+#define tor_mutex_acquire(m) STMT_VOID(m)
+#define tor_mutex_release(m) STMT_NIL
+#define tor_mutex_free(m) STMT_BEGIN tor_free(m); STMT_END
+#define tor_mutex_uninit(m) STMT_NIL
+#define tor_get_thread_id() (1UL)
+#define tor_threads_init() STMT_NIL
+#endif
 
 void set_main_thread(void);
 int in_main_thread(void);
 
+#ifdef TOR_IS_MULTITHREADED
 #if 0
 typedef struct tor_cond_t tor_cond_t;
 tor_cond_t *tor_cond_new(void);
@@ -683,6 +703,7 @@ void tor_cond_free(tor_cond_t *cond);
 int tor_cond_wait(tor_cond_t *cond, tor_mutex_t *mutex);
 void tor_cond_signal_one(tor_cond_t *cond);
 void tor_cond_signal_all(tor_cond_t *cond);
+#endif
 #endif
 
 /** Macros for MIN/MAX.  Never use these when the arguments could have
@@ -716,10 +737,6 @@ char *format_win32_error(DWORD err);
 #define VER_SUITE_SINGLEUSERTS 0x00000100
 #endif
 
-#endif
-
-#ifdef TOR_UNIT_TESTS
-void tor_sleep_msec(int msec);
 #endif
 
 #ifdef COMPAT_PRIVATE

@@ -43,7 +43,14 @@ typedef struct nodelist_t {
 static INLINE unsigned int
 node_id_hash(const node_t *node)
 {
-  return (unsigned) siphash24g(node->identity, DIGEST_LEN);
+#if SIZEOF_INT == 4
+  const uint32_t *p = (const uint32_t*)node->identity;
+  return p[0] ^ p[1] ^ p[2] ^ p[3] ^ p[4];
+#elif SIZEOF_INT == 8
+  const uint64_t *p = (const uint32_t*)node->identity;
+  const uint32_t *p32 = (const uint32_t*)node->identity;
+  return p[0] ^ p[1] ^ p32[4];
+#endif
 }
 
 static INLINE unsigned int
@@ -85,8 +92,8 @@ node_get_mutable_by_id(const char *identity_digest)
 
 /** Return the node_t whose identity is <b>identity_digest</b>, or NULL
  * if no such node exists. */
-MOCK_IMPL(const node_t *,
-node_get_by_id,(const char *identity_digest))
+const node_t *
+node_get_by_id(const char *identity_digest)
 {
   return node_get_mutable_by_id(identity_digest);
 }
@@ -330,25 +337,6 @@ nodelist_drop_node(node_t *node, int remove_from_ht)
     tmp->nodelist_idx = idx;
   }
   node->nodelist_idx = -1;
-}
-
-/** Return a newly allocated smartlist of the nodes that have <b>md</b> as
- * their microdescriptor. */
-smartlist_t *
-nodelist_find_nodes_with_microdesc(const microdesc_t *md)
-{
-  smartlist_t *result = smartlist_new();
-
-  if (the_nodelist == NULL)
-    return result;
-
-  SMARTLIST_FOREACH_BEGIN(the_nodelist->nodes, node_t *, node) {
-    if (node->md == md) {
-      smartlist_add(result, node);
-    }
-  } SMARTLIST_FOREACH_END(node);
-
-  return result;
 }
 
 /** Release storage held by <b>node</b>  */
@@ -804,7 +792,7 @@ void
 node_get_address_string(const node_t *node, char *buf, size_t len)
 {
   if (node->ri) {
-    strlcpy(buf, fmt_addr32(node->ri->addr), len);
+    strlcpy(buf, node->ri->address, len);
   } else if (node->rs) {
     tor_addr_t addr;
     tor_addr_from_ipv4h(&addr, node->rs->addr);
@@ -1249,12 +1237,10 @@ router_set_status(const char *digest, int up)
     if (!up && node_is_me(node) && !net_is_disabled())
       log_warn(LD_NET, "We just marked ourself as down. Are your external "
                "addresses reachable?");
-
-    if (bool_neq(node->is_running, up))
-      router_dir_info_changed();
-
     node->is_running = up;
   }
+
+  router_dir_info_changed();
 }
 
 /** True iff, the last time we checked whether we had enough directory info
@@ -1498,7 +1484,6 @@ update_router_have_minimum_dir_info(void)
   const networkstatus_t *consensus =
     networkstatus_get_reasonably_live_consensus(now,usable_consensus_flavor());
   int using_md;
-  const char *delay_fetches_msg = NULL;
 
   if (!consensus) {
     if (!networkstatus_get_latest_consensus())
@@ -1511,9 +1496,10 @@ update_router_have_minimum_dir_info(void)
     goto done;
   }
 
-  if (should_delay_dir_fetches(get_options(), &delay_fetches_msg)) {
-    log_notice(LD_DIR, "Delaying directory fetches: %s", delay_fetches_msg);
-    strlcpy(dir_info_status, delay_fetches_msg,  sizeof(dir_info_status));
+  if (should_delay_dir_fetches(get_options())) {
+    log_notice(LD_DIR, "no known bridge descriptors running yet; stalling");
+    strlcpy(dir_info_status, "No live bridge descriptors.",
+            sizeof(dir_info_status));
     res = 0;
     goto done;
   }

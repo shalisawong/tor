@@ -1282,6 +1282,7 @@ static void
 channel_tls_process_versions_cell(var_cell_t *cell, channel_tls_t *chan)
 {
   int highest_supported_version = 0;
+  const uint8_t *cp, *end;
   int started_here = 0;
 
   tor_assert(cell);
@@ -1321,15 +1322,11 @@ channel_tls_process_versions_cell(var_cell_t *cell, channel_tls_t *chan)
   }
 
   tor_assert(chan->conn->handshake_state);
-
-  {
-    int i;
-    const uint8_t *cp = cell->payload;
-    for (i = 0; i < cell->payload_len / 2; ++i, cp += 2) {
-      uint16_t v = ntohs(get_uint16(cp));
-      if (is_or_protocol_version_known(v) && v > highest_supported_version)
-        highest_supported_version = v;
-    }
+  end = cell->payload + cell->payload_len;
+  for (cp = cell->payload; cp+1 < end; cp += 2) {
+    uint16_t v = ntohs(get_uint16(cp));
+    if (is_or_protocol_version_known(v) && v > highest_supported_version)
+      highest_supported_version = v;
   }
   if (!highest_supported_version) {
     log_fn(LOG_PROTOCOL_WARN, LD_OR,
@@ -1554,7 +1551,7 @@ channel_tls_process_netinfo_cell(cell_t *cell, channel_tls_t *chan)
       return;
     }
     if (tor_addr_eq(&addr, &(chan->conn->real_addr))) {
-      connection_or_set_canonical(chan->conn, 1);
+      chan->conn->is_canonical = 1;
       break;
     }
     cp = next;
@@ -1688,16 +1685,12 @@ channel_tls_process_certs_cell(var_cell_t *cell, channel_tls_t *chan)
   for (i = 0; i < n_certs; ++i) {
     uint8_t cert_type;
     uint16_t cert_len;
-    if (cell->payload_len < 3)
-      goto truncated;
-    if (ptr > cell->payload + cell->payload_len - 3) {
+    if (ptr + 3 > cell->payload + cell->payload_len) {
       goto truncated;
     }
     cert_type = *ptr;
     cert_len = ntohs(get_uint16(ptr+1));
-    if (cell->payload_len < 3 + cert_len)
-      goto truncated;
-    if (ptr > cell->payload + cell->payload_len - cert_len - 3) {
+    if (ptr + 3 + cert_len > cell->payload + cell->payload_len) {
       goto truncated;
     }
     if (cert_type == OR_CERT_TYPE_TLS_LINK ||

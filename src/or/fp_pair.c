@@ -32,8 +32,17 @@ fp_pair_map_entries_eq(const fp_pair_map_entry_t *a,
 static INLINE unsigned int
 fp_pair_map_entry_hash(const fp_pair_map_entry_t *a)
 {
-  tor_assert(sizeof(a->key) == DIGEST_LEN*2);
-  return (unsigned) siphash24g(&a->key, DIGEST_LEN*2);
+  const uint32_t *p;
+  unsigned int hash;
+
+  p = (const uint32_t *)(a->key.first);
+  /* Hashes are 20 bytes long, so 5 times uint32_t */
+  hash = p[0] ^ p[1] ^ p[2] ^ p[3] ^ p[4];
+  /* Now XOR in the second fingerprint */
+  p = (const uint32_t *)(a->key.second);
+  hash ^= p[0] ^ p[1] ^ p[2] ^ p[3] ^ p[4];
+
+  return hash;
 }
 
 /*

@@ -296,7 +296,7 @@ circuit_get_best(const entry_connection_t *conn,
     }
 
     if (!circuit_is_acceptable(origin_circ,conn,must_be_open,purpose,
-                               need_uptime,need_internal, (time_t)now.tv_sec))
+                               need_uptime,need_internal,now.tv_sec))
       continue;
 
     /* now this is an acceptable circ to hand back. but that doesn't
@@ -537,9 +537,7 @@ circuit_expire_building(void)
                  "%d guards are live.",
                  TO_ORIGIN_CIRCUIT(victim)->global_identifier,
                  circuit_purpose_to_string(victim->purpose),
-                 TO_ORIGIN_CIRCUIT(victim)->build_state ?
-                   TO_ORIGIN_CIRCUIT(victim)->build_state->desired_path_len :
-                   -1,
+                 TO_ORIGIN_CIRCUIT(victim)->build_state->desired_path_len,
                  circuit_state_to_string(victim->state),
                  channel_state_to_string(victim->n_chan->state),
                  num_live_entry_guards(0));
@@ -563,9 +561,7 @@ circuit_expire_building(void)
                  "anyway. %d guards are live.",
                  TO_ORIGIN_CIRCUIT(victim)->global_identifier,
                  circuit_purpose_to_string(victim->purpose),
-                 TO_ORIGIN_CIRCUIT(victim)->build_state ?
-                   TO_ORIGIN_CIRCUIT(victim)->build_state->desired_path_len :
-                   -1,
+                 TO_ORIGIN_CIRCUIT(victim)->build_state->desired_path_len,
                  circuit_state_to_string(victim->state),
                  channel_state_to_string(victim->n_chan->state),
                  (long)build_close_ms,
@@ -683,9 +679,9 @@ circuit_expire_building(void)
                      victim->purpose,
                      circuit_purpose_to_string(victim->purpose));
         } else if (circuit_build_times_count_close(
-            get_circuit_build_times_mutable(),
-            first_hop_succeeded,
-            (time_t)victim->timestamp_created.tv_sec)) {
+                                         get_circuit_build_times_mutable(),
+                                         first_hop_succeeded,
+                                         victim->timestamp_created.tv_sec)) {
           circuit_build_times_set_timeout(get_circuit_build_times_mutable());
         }
       }
@@ -711,8 +707,7 @@ circuit_expire_building(void)
          * and we have tried to send an INTRODUCE1 cell specifying it.
          * Thus, if the pending_final_cpath field *is* NULL, then we
          * want to not spare it. */
-        if (TO_ORIGIN_CIRCUIT(victim)->build_state &&
-            TO_ORIGIN_CIRCUIT(victim)->build_state->pending_final_cpath ==
+        if (TO_ORIGIN_CIRCUIT(victim)->build_state->pending_final_cpath ==
             NULL)
           break;
         /* fallthrough! */
@@ -758,9 +753,7 @@ circuit_expire_building(void)
                TO_ORIGIN_CIRCUIT(victim)->has_opened,
                victim->state, circuit_state_to_string(victim->state),
                victim->purpose,
-               TO_ORIGIN_CIRCUIT(victim)->build_state ?
-                 TO_ORIGIN_CIRCUIT(victim)->build_state->desired_path_len :
-                 -1);
+               TO_ORIGIN_CIRCUIT(victim)->build_state->desired_path_len);
     else
       log_info(LD_CIRC,
                "Abandoning circ %u %u (state %d,%d:%s, purpose %d, len %d)",
@@ -769,9 +762,7 @@ circuit_expire_building(void)
                TO_ORIGIN_CIRCUIT(victim)->has_opened,
                victim->state,
                circuit_state_to_string(victim->state), victim->purpose,
-               TO_ORIGIN_CIRCUIT(victim)->build_state ?
-                 TO_ORIGIN_CIRCUIT(victim)->build_state->desired_path_len :
-                 -1);
+               TO_ORIGIN_CIRCUIT(victim)->build_state->desired_path_len);
 
     circuit_log_path(LOG_INFO,LD_CIRC,TO_ORIGIN_CIRCUIT(victim));
     if (victim->purpose == CIRCUIT_PURPOSE_C_MEASURE_TIMEOUT)
@@ -781,121 +772,6 @@ circuit_expire_building(void)
 
     pathbias_count_timeout(TO_ORIGIN_CIRCUIT(victim));
   }
-}
-
-/**
- * As a diagnostic for bug 8387, log information about how many one-hop
- * circuits we have around that have been there for at least <b>age</b>
- * seconds. Log a few of them.
- */
-void
-circuit_log_ancient_one_hop_circuits(int age)
-{
-#define MAX_ANCIENT_ONEHOP_CIRCUITS_TO_LOG 10
-  time_t now = time(NULL);
-  time_t cutoff = now - age;
-  int n_found = 0;
-  smartlist_t *log_these = smartlist_new();
-  const circuit_t *circ;
-
-  TOR_LIST_FOREACH(circ, circuit_get_global_list(), head) {
-    const origin_circuit_t *ocirc;
-    if (! CIRCUIT_IS_ORIGIN(circ))
-      continue;
-    if (circ->timestamp_created.tv_sec >= cutoff)
-      continue;
-    ocirc = CONST_TO_ORIGIN_CIRCUIT(circ);
-
-    if (ocirc->build_state && ocirc->build_state->onehop_tunnel) {
-      ++n_found;
-
-      if (smartlist_len(log_these) < MAX_ANCIENT_ONEHOP_CIRCUITS_TO_LOG)
-        smartlist_add(log_these, (origin_circuit_t*) ocirc);
-    }
-  }
-
-  if (n_found == 0)
-    goto done;
-
-  log_notice(LD_HEARTBEAT,
-             "Diagnostic for issue 8387: Found %d one-hop circuits more "
-             "than %d seconds old! Logging %d...",
-             n_found, age, smartlist_len(log_these));
-
-  SMARTLIST_FOREACH_BEGIN(log_these, const origin_circuit_t *, ocirc) {
-    char created[ISO_TIME_LEN+1];
-    int stream_num;
-    const edge_connection_t *conn;
-    char *dirty = NULL;
-    circ = TO_CIRCUIT(ocirc);
-
-    format_local_iso_time(created,
-                          (time_t)circ->timestamp_created.tv_sec);
-
-    if (circ->timestamp_dirty) {
-      char dirty_since[ISO_TIME_LEN+1];
-      format_local_iso_time(dirty_since, circ->timestamp_dirty);
-
-      tor_asprintf(&dirty, "Dirty since %s (%ld seconds vs %ld-second cutoff)",
-                   dirty_since, (long)(now - circ->timestamp_dirty),
-                   (long) get_options()->MaxCircuitDirtiness);
-    } else {
-      dirty = tor_strdup("Not marked dirty");
-    }
-
-    log_notice(LD_HEARTBEAT, "  #%d created at %s. %s, %s. %s for close. "
-               "%s for new conns. %s.",
-               ocirc_sl_idx,
-               created,
-               circuit_state_to_string(circ->state),
-               circuit_purpose_to_string(circ->purpose),
-               circ->marked_for_close ? "Marked" : "Not marked",
-               ocirc->unusable_for_new_conns ? "Not usable" : "usable",
-               dirty);
-    tor_free(dirty);
-
-    stream_num = 0;
-    for (conn = ocirc->p_streams; conn; conn = conn->next_stream) {
-      const connection_t *c = TO_CONN(conn);
-      char stream_created[ISO_TIME_LEN+1];
-      if (++stream_num >= 5)
-        break;
-
-      format_local_iso_time(stream_created, c->timestamp_created);
-
-      log_notice(LD_HEARTBEAT, "     Stream#%d created at %s. "
-                 "%s conn in state %s. "
-                 "%s for close (%s:%d). Hold-open is %sset. "
-                 "Has %ssent RELAY_END. %s on circuit.",
-                 stream_num,
-                 stream_created,
-                 conn_type_to_string(c->type),
-                 conn_state_to_string(c->type, c->state),
-                 c->marked_for_close ? "Marked" : "Not marked",
-                 c->marked_for_close_file ? c->marked_for_close_file : "--",
-                 c->marked_for_close,
-                 c->hold_open_until_flushed ? "" : "not ",
-                 conn->edge_has_sent_end ? "" : "not ",
-                 conn->edge_blocked_on_circ ? "Blocked" : "Not blocked");
-      if (! c->linked_conn)
-        continue;
-
-      c = c->linked_conn;
-
-      log_notice(LD_HEARTBEAT, "        Linked to %s connection in state %s "
-                 "(Purpose %d). %s for close (%s:%d). Hold-open is %sset. ",
-                 conn_type_to_string(c->type),
-                 conn_state_to_string(c->type, c->state),
-                 c->purpose,
-                 c->marked_for_close ? "Marked" : "Not marked",
-                 c->marked_for_close_file ? c->marked_for_close_file : "--",
-                 c->marked_for_close,
-                 c->hold_open_until_flushed ? "" : "not ");
-    }
-  } SMARTLIST_FOREACH_END(ocirc);
-
- done:
-  smartlist_free(log_these);
 }
 
 /** Remove any elements in <b>needed_ports</b> that are handled by an
@@ -1639,7 +1515,7 @@ circuit_launch_by_extend_info(uint8_t purpose,
     circ = circuit_find_to_cannibalize(purpose, extend_info, flags);
     if (circ) {
       uint8_t old_purpose = circ->base_.purpose;
-      struct timeval old_timestamp_began = circ->base_.timestamp_began;
+      struct timeval old_timestamp_began;
 
       log_info(LD_CIRC,"Cannibalizing circ '%s' for purpose %d (%s)",
                build_state_get_exit_nickname(circ->build_state), purpose,

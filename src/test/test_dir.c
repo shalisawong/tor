@@ -11,7 +11,6 @@
 #define ROUTER_PRIVATE
 #define ROUTERLIST_PRIVATE
 #define HIBERNATE_PRIVATE
-#define NETWORKSTATUS_PRIVATE
 #include "or.h"
 #include "config.h"
 #include "directory.h"
@@ -98,6 +97,7 @@ test_dir_formats(void)
 
   get_platform_str(platform, sizeof(platform));
   r1 = tor_malloc_zero(sizeof(routerinfo_t));
+  r1->address = tor_strdup("18.244.0.1");
   r1->addr = 0xc0a80001u; /* 192.168.0.1 */
   r1->cache_info.published_on = 0;
   r1->or_port = 9000;
@@ -124,6 +124,7 @@ test_dir_formats(void)
   ex2->maskbits = 8;
   ex2->prt_min = ex2->prt_max = 24;
   r2 = tor_malloc_zero(sizeof(routerinfo_t));
+  r2->address = tor_strdup("1.1.1.1");
   r2->addr = 0x0a030201u; /* 10.3.2.1 */
   r2->platform = tor_strdup(platform);
   r2->cache_info.published_on = 5;
@@ -152,7 +153,7 @@ test_dir_formats(void)
   tor_free(options->ContactInfo);
   test_assert(buf);
 
-  strlcpy(buf2, "router Magri 192.168.0.1 9000 0 9003\n"
+  strlcpy(buf2, "router Magri 18.244.0.1 9000 0 9003\n"
           "or-address [1:2:3:4::]:9999\n"
           "platform Tor "VERSION" on ", sizeof(buf2));
   strlcat(buf2, get_uname(), sizeof(buf2));
@@ -186,7 +187,7 @@ test_dir_formats(void)
   cp = buf;
   rp1 = router_parse_entry_from_string((const char*)cp,NULL,1,0,NULL);
   test_assert(rp1);
-  test_eq(rp1->addr, r1->addr);
+  test_streq(rp1->address, r1->address);
   test_eq(rp1->or_port, r1->or_port);
   //test_eq(rp1->dir_port, r1->dir_port);
   test_eq(rp1->bandwidthrate, r1->bandwidthrate);
@@ -195,10 +196,9 @@ test_dir_formats(void)
   test_assert(crypto_pk_cmp_keys(rp1->onion_pkey, pk1) == 0);
   test_assert(crypto_pk_cmp_keys(rp1->identity_pkey, pk2) == 0);
   //test_assert(rp1->exit_policy == NULL);
-  tor_free(buf);
 
   strlcpy(buf2,
-          "router Fred 10.3.2.1 9005 0 0\n"
+          "router Fred 1.1.1.1 9005 0 0\n"
           "platform Tor "VERSION" on ", sizeof(buf2));
   strlcat(buf2, get_uname(), sizeof(buf2));
   strlcat(buf2, "\n"
@@ -231,7 +231,7 @@ test_dir_formats(void)
   cp = buf;
   rp2 = router_parse_entry_from_string((const char*)cp,NULL,1,0,NULL);
   test_assert(rp2);
-  test_eq(rp2->addr, r2->addr);
+  test_streq(rp2->address, r2->address);
   test_eq(rp2->or_port, r2->or_port);
   test_eq(rp2->dir_port, r2->dir_port);
   test_eq(rp2->bandwidthrate, r2->bandwidthrate);
@@ -279,8 +279,6 @@ test_dir_formats(void)
     routerinfo_free(r1);
   if (r2)
     routerinfo_free(r2);
-  if (rp2)
-    routerinfo_free(rp2);
 
   tor_free(buf);
   tor_free(pk1_str);
@@ -1015,14 +1013,16 @@ vote_tweaks_for_v3ns(networkstatus_t *v, int voter, time_t now)
     /* Monkey around with the list a bit */
     vrs = smartlist_get(v->routerstatus_list, 2);
     smartlist_del_keeporder(v->routerstatus_list, 2);
-    vote_routerstatus_free(vrs);
+    tor_free(vrs->version);
+    tor_free(vrs);
     vrs = smartlist_get(v->routerstatus_list, 0);
     vrs->status.is_fast = 1;
 
     if (voter == 3) {
       vrs = smartlist_get(v->routerstatus_list, 0);
       smartlist_del_keeporder(v->routerstatus_list, 0);
-      vote_routerstatus_free(vrs);
+      tor_free(vrs->version);
+      tor_free(vrs);
       vrs = smartlist_get(v->routerstatus_list, 0);
       memset(vrs->status.descriptor_digest, (int)'Z', DIGEST_LEN);
       test_assert(router_add_to_routerlist(
@@ -1066,7 +1066,7 @@ test_vrs_for_v3ns(vote_routerstatus_t *vrs, int voter, time_t now)
     test_eq(rs->or_port, 443);
     test_eq(rs->dir_port, 8000);
     /* no flags except "running" (16) and "v2dir" (64) */
-    tt_u64_op(vrs->flags, ==, U64_LITERAL(80));
+    test_eq(vrs->flags, U64_LITERAL(80));
   } else if (tor_memeq(rs->identity_digest,
                        "\x5\x5\x5\x5\x5\x5\x5\x5\x5\x5\x5\x5\x5\x5\x5\x5"
                        "\x5\x5\x5\x5",
@@ -1092,10 +1092,10 @@ test_vrs_for_v3ns(vote_routerstatus_t *vrs, int voter, time_t now)
     test_eq(rs->ipv6_orport, 4711);
     if (voter == 1) {
       /* all except "authority" (1) and "v2dir" (64) */
-      tt_u64_op(vrs->flags, ==, U64_LITERAL(190));
+      test_eq(vrs->flags, U64_LITERAL(190));
     } else {
       /* 1023 - authority(1) - madeofcheese(16) - madeoftin(32) - v2dir(256) */
-      tt_u64_op(vrs->flags, ==, U64_LITERAL(718));
+      test_eq(vrs->flags, U64_LITERAL(718));
     }
   } else if (tor_memeq(rs->identity_digest,
                        "\x33\x33\x33\x33\x33\x33\x33\x33\x33\x33"
@@ -1362,8 +1362,7 @@ test_a_networkstatus(
   vote->dist_seconds = 300;
   authority_cert_free(vote->cert);
   vote->cert = authority_cert_dup(cert2);
-  SMARTLIST_FOREACH(vote->net_params, char *, c, tor_free(c));
-  smartlist_clear(vote->net_params);
+  vote->net_params = smartlist_new();
   smartlist_split_string(vote->net_params, "bar=2000000000 circuitwindow=20",
                          NULL, 0, 0);
   tor_free(vote->client_versions);
@@ -1407,8 +1406,7 @@ test_a_networkstatus(
   vote->dist_seconds = 250;
   authority_cert_free(vote->cert);
   vote->cert = authority_cert_dup(cert3);
-  SMARTLIST_FOREACH(vote->net_params, char *, c, tor_free(c));
-  smartlist_clear(vote->net_params);
+  vote->net_params = smartlist_new();
   smartlist_split_string(vote->net_params, "circuitwindow=80 foo=660",
                          NULL, 0, 0);
   smartlist_add(vote->supported_methods, tor_strdup("4"));
@@ -1775,7 +1773,7 @@ test_dir_random_weighted(void *testdata)
     inp[i].u64 = vals[i];
     total += vals[i];
   }
-  tt_u64_op(total, ==, 45);
+  tt_int_op(total, ==, 45);
   for (i=0; i<n; ++i) {
     choice = choose_array_element_by_weight(inp, 10);
     tt_int_op(choice, >=, 0);
@@ -1985,7 +1983,6 @@ vote_tweaks_for_umbw(networkstatus_t *v, int voter, time_t now)
   (void)now;
 
   test_assert(v->supported_methods);
-  SMARTLIST_FOREACH(v->supported_methods, char *, c, tor_free(c));
   smartlist_clear(v->supported_methods);
   /* Method 17 is MIN_METHOD_TO_CLIP_UNMEASURED_BW_KB */
   smartlist_split_string(v->supported_methods,

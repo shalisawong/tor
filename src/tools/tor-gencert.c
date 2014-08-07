@@ -302,7 +302,6 @@ load_identity_key(void)
     if (!identity_key) {
       log_err(LD_GENERAL, "Couldn't read identity key from %s",
               identity_key_file);
-      fclose(f);
       return 1;
     }
     fclose(f);
@@ -323,7 +322,6 @@ load_signing_key(void)
   }
   if (!(signing_key = PEM_read_PrivateKey(f, NULL, NULL, NULL))) {
     log_err(LD_GENERAL, "Couldn't read siging key from %s", signing_key_file);
-    fclose(f);
     return 1;
   }
   fclose(f);
@@ -549,9 +547,6 @@ main(int argc, char **argv)
   if (signing_key)
     EVP_PKEY_free(signing_key);
   tor_free(address);
-  tor_free(identity_key_file);
-  tor_free(signing_key_file);
-  tor_free(certificate_file);
 
   crypto_global_cleanup();
   return r;

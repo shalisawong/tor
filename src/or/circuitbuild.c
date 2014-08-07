@@ -9,8 +9,6 @@
  * \brief The actual details of building circuits.
  **/
 
-#define CIRCUITBUILD_PRIVATE
-
 #include "or.h"
 #include "channel.h"
 #include "circpathbias.h"
@@ -79,29 +77,18 @@ channel_connect_for_circuit(const tor_addr_t *addr, uint16_t port,
   return chan;
 }
 
-/** Search for a value for circ_id that we can use on <b>chan</b> for an
- * outbound circuit, until we get a circ_id that is not in use by any other
- * circuit on that conn.
+/** Iterate over values of circ_id, starting from conn-\>next_circ_id,
+ * and with the high bit specified by conn-\>circ_id_type, until we get
+ * a circ_id that is not in use by any other circuit on that conn.
  *
  * Return it, or 0 if can't get a unique circ_id.
  */
-STATIC circid_t
+static circid_t
 get_unique_circ_id_by_chan(channel_t *chan)
 {
-/* This number is chosen somewhat arbitrarily; see comment below for more
- * info.  When the space is 80% full, it gives a one-in-a-million failure
- * chance; when the space is 90% full, it gives a one-in-850 chance; and when
- * the space is 95% full, it gives a one-in-26 failure chance.  That seems
- * okay, though you could make a case IMO for anything between N=32 and
- * N=256. */
-#define MAX_CIRCID_ATTEMPTS 64
-  int in_use;
-  unsigned n_with_circ = 0, n_pending_destroy = 0, n_weird_pending_destroy = 0;
   circid_t test_circ_id;
   circid_t attempts=0;
-  circid_t high_bit, max_range, mask;
-  int64_t pending_destroy_time_total = 0;
-  int64_t pending_destroy_time_max = 0;
+  circid_t high_bit, max_range;
 
   tor_assert(chan);
 
@@ -111,106 +98,25 @@ get_unique_circ_id_by_chan(channel_t *chan)
              "a client with no identity.");
     return 0;
   }
-  max_range = (chan->wide_circ_ids) ? (1u<<31) : (1u<<15);
-  mask = max_range - 1;
+  max_range =  (chan->wide_circ_ids) ? (1u<<31) : (1u<<15);
   high_bit = (chan->circ_id_type == CIRC_ID_TYPE_HIGHER) ? max_range : 0;
   do {
-    if (++attempts > MAX_CIRCID_ATTEMPTS) {
-      /* Make sure we don't loop forever because all circuit IDs are used.
-       *
-       * Once, we would try until we had tried every possible circuit ID.  But
-       * that's quite expensive.  Instead, we try MAX_CIRCID_ATTEMPTS random
-       * circuit IDs, and then give up.
-       *
-       * This potentially causes us to give up early if our circuit ID space
-       * is nearly full.  If we have N circuit IDs in use, then we will reject
-       * a new circuit with probability (N / max_range) ^ MAX_CIRCID_ATTEMPTS.
-       * This means that in practice, a few percent of our circuit ID capacity
-       * will go unused.
-       *
-       * The alternative here, though, is to do a linear search over the
-       * whole circuit ID space every time we extend a circuit, which is
-       * not so great either.
+    /* Sequentially iterate over test_circ_id=1...max_range until we find a
+     * circID such that (high_bit|test_circ_id) is not already used. */
+    test_circ_id = chan->next_circ_id++;
+    if (test_circ_id == 0 || test_circ_id >= max_range) {
+      test_circ_id = 1;
+      chan->next_circ_id = 2;
+    }
+    if (++attempts > max_range) {
+      /* Make sure we don't loop forever if all circ_id's are used. This
+       * matters because it's an external DoS opportunity.
        */
-      int64_t queued_destroys;
-      char *m = rate_limit_log(&chan->last_warned_circ_ids_exhausted,
-                               approx_time());
-      if (m == NULL)
-        return 0; /* This message has been rate-limited away. */
-      if (n_pending_destroy)
-        pending_destroy_time_total /= n_pending_destroy;
-      log_warn(LD_CIRC,"No unused circIDs found on channel %s wide "
-                 "circID support, with %u inbound and %u outbound circuits. "
-                 "Found %u circuit IDs in use by circuits, and %u with "
-                 "pending destroy cells. (%u of those were marked bogusly.) "
-                 "The ones with pending destroy cells "
-                 "have been marked unusable for an average of %ld seconds "
-                 "and a maximum of %ld seconds. This channel is %ld seconds "
-                 "old. Failing a circuit.%s",
-                 chan->wide_circ_ids ? "with" : "without",
-                 chan->num_p_circuits, chan->num_n_circuits,
-                 n_with_circ, n_pending_destroy, n_weird_pending_destroy,
-                 (long)pending_destroy_time_total,
-                 (long)pending_destroy_time_max,
-                 (long)(approx_time() - chan->timestamp_created),
-                 m);
-      tor_free(m);
-
-      if (!chan->cmux) {
-        /* This warning should be impossible. */
-        log_warn(LD_BUG, "  This channel somehow has no cmux on it!");
-        return 0;
-      }
-
-      /* analysis so far on 12184 suggests that we're running out of circuit
-         IDs because it looks like we have too many pending destroy
-         cells. Let's see how many we really have pending.
-      */
-      queued_destroys = circuitmux_count_queued_destroy_cells(chan,
-                                                              chan->cmux);
-
-      log_warn(LD_CIRC, "  Circuitmux on this channel has %u circuits, "
-               "of which %u are active. It says it has "I64_FORMAT
-               " destroy cells queued.",
-               circuitmux_num_circuits(chan->cmux),
-               circuitmux_num_active_circuits(chan->cmux),
-               I64_PRINTF_ARG(queued_destroys));
-
-      /* Change this into "if (1)" in order to get more information about
-       * possible failure modes here.  You'll need to know how to use gdb with
-       * Tor: this will make Tor exit with an assertion failure if the cmux is
-       * corrupt. */
-      if (0)
-        circuitmux_assert_okay(chan->cmux);
-
+      log_warn(LD_CIRC,"No unused circ IDs. Failing.");
       return 0;
     }
-
-    do {
-      crypto_rand((char*) &test_circ_id, sizeof(test_circ_id));
-      test_circ_id &= mask;
-    } while (test_circ_id == 0);
-
     test_circ_id |= high_bit;
-
-    in_use = circuit_id_in_use_on_channel(test_circ_id, chan);
-    if (in_use == 1)
-      ++n_with_circ;
-    else if (in_use == 2) {
-      time_t since_when;
-      ++n_pending_destroy;
-      since_when =
-        circuit_id_when_marked_unusable_on_channel(test_circ_id, chan);
-      if (since_when) {
-        time_t waiting = approx_time() - since_when;
-        pending_destroy_time_total += waiting;
-        if (waiting > pending_destroy_time_max)
-          pending_destroy_time_max = waiting;
-      } else {
-        ++n_weird_pending_destroy;
-      }
-    }
-  } while (in_use);
+  } while (circuit_id_in_use_on_channel(test_circ_id, chan));
   return test_circ_id;
 }
 
@@ -371,9 +277,9 @@ circuit_rep_hist_note_result(origin_circuit_t *circ)
 static int
 circuit_cpath_supports_ntor(const origin_circuit_t *circ)
 {
-  crypt_path_t *head, *cpath;
+  crypt_path_t *head = circ->cpath, *cpath = circ->cpath;
 
-  cpath = head = circ->cpath;
+  cpath = head;
   do {
     if (cpath->extend_info &&
         !tor_mem_is_zero(
@@ -655,9 +561,7 @@ circuit_deliver_create_cell(circuit_t *circ, const create_cell_t *create_cell,
 
   id = get_unique_circ_id_by_chan(circ->n_chan);
   if (!id) {
-    static ratelim_t circid_warning_limit = RATELIM_INIT(9600);
-    log_fn_ratelim(&circid_warning_limit, LOG_WARN, LD_CIRC,
-                   "failed to get unique circID.");
+    log_warn(LD_CIRC,"failed to get unique circID.");
     return -1;
   }
   log_debug(LD_CIRC,"Chosen circID %u.", (unsigned)id);
@@ -702,30 +606,27 @@ int
 inform_testing_reachability(void)
 {
   char dirbuf[128];
-  char *address;
   const routerinfo_t *me = router_get_my_routerinfo();
   if (!me)
     return 0;
-  address = tor_dup_ip(me->addr);
   control_event_server_status(LOG_NOTICE,
                               "CHECKING_REACHABILITY ORADDRESS=%s:%d",
-                              address, me->or_port);
+                              me->address, me->or_port);
   if (me->dir_port) {
     tor_snprintf(dirbuf, sizeof(dirbuf), " and DirPort %s:%d",
-                 address, me->dir_port);
+                 me->address, me->dir_port);
     control_event_server_status(LOG_NOTICE,
                                 "CHECKING_REACHABILITY DIRADDRESS=%s:%d",
-                                address, me->dir_port);
+                                me->address, me->dir_port);
   }
   log_notice(LD_OR, "Now checking whether ORPort %s:%d%s %s reachable... "
                          "(this may take up to %d minutes -- look for log "
                          "messages indicating success)",
-      address, me->or_port,
+      me->address, me->or_port,
       me->dir_port ? dirbuf : "",
       me->dir_port ? "are" : "is",
       TIMEOUT_UNTIL_UNREACHABILITY_COMPLAINT/60);
 
-  tor_free(address);
   return 1;
 }
 

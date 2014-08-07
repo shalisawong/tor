@@ -329,14 +329,12 @@ onion_queue_entry_remove(onion_queue_t *victim)
 void
 clear_pending_onions(void)
 {
-  onion_queue_t *victim, *next;
+  onion_queue_t *victim;
   int i;
   for (i=0; i<=MAX_ONION_HANDSHAKE_TYPE; i++) {
-    for (victim = TOR_TAILQ_FIRST(&ol_list[i]); victim; victim = next) {
-      next = TOR_TAILQ_NEXT(victim,next);
+    while ((victim = TOR_TAILQ_FIRST(&ol_list[i]))) {
       onion_queue_entry_remove(victim);
     }
-    tor_assert(TOR_TAILQ_EMPTY(&ol_list[i]));
   }
   memset(ol_entries, 0, sizeof(ol_entries));
 }
@@ -554,10 +552,8 @@ onion_skin_client_handshake(int type,
 
   switch (type) {
   case ONION_HANDSHAKE_TYPE_TAP:
-    if (reply_len != TAP_ONIONSKIN_REPLY_LEN) {
-      log_warn(LD_CIRC, "TAP reply was not of the correct length.");
+    if (reply_len != TAP_ONIONSKIN_REPLY_LEN)
       return -1;
-    }
     if (onion_skin_TAP_client_handshake(handshake_state->u.tap,
                                         (const char*)reply,
                                         (char *)keys_out, keys_out_len) < 0)
@@ -567,10 +563,8 @@ onion_skin_client_handshake(int type,
 
     return 0;
   case ONION_HANDSHAKE_TYPE_FAST:
-    if (reply_len != CREATED_FAST_LEN) {
-      log_warn(LD_CIRC, "CREATED_FAST reply was not of the correct length.");
+    if (reply_len != CREATED_FAST_LEN)
       return -1;
-    }
     if (fast_client_handshake(handshake_state->u.fast, reply,
                               keys_out, keys_out_len) < 0)
       return -1;
@@ -579,10 +573,8 @@ onion_skin_client_handshake(int type,
     return 0;
 #ifdef CURVE25519_ENABLED
   case ONION_HANDSHAKE_TYPE_NTOR:
-    if (reply_len < NTOR_REPLY_LEN) {
-      log_warn(LD_CIRC, "ntor reply was not of the correct length.");
+    if (reply_len < NTOR_REPLY_LEN)
       return -1;
-    }
     {
       size_t keys_tmp_len = keys_out_len + DIGEST_LEN;
       uint8_t *keys_tmp = tor_malloc(keys_tmp_len);

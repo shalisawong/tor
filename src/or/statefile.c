@@ -13,7 +13,6 @@
 #include "hibernate.h"
 #include "rephist.h"
 #include "router.h"
-#include "sandbox.h"
 #include "statefile.h"
 
 /** A list of state-file "abbreviations," for compatibility. */
@@ -261,7 +260,7 @@ or_state_set(or_state_t *new_state)
 static void
 or_state_save_broken(char *fname)
 {
-  int i, res;
+  int i;
   file_status_t status;
   char *fname2 = NULL;
   for (i = 0; i < 100; ++i) {
@@ -275,33 +274,17 @@ or_state_save_broken(char *fname)
     log_warn(LD_BUG, "Unable to parse state in \"%s\"; too many saved bad "
              "state files to move aside. Discarding the old state file.",
              fname);
-    res = unlink(fname);
-    if (res != 0) {
-      log_warn(LD_FS,
-               "Also couldn't discard old state file \"%s\" because "
-               "unlink() failed: %s",
-               fname, strerror(errno));
-    }
+    unlink(fname);
   } else {
     log_warn(LD_BUG, "Unable to parse state in \"%s\". Moving it aside "
              "to \"%s\".  This could be a bug in Tor; please tell "
              "the developers.", fname, fname2);
-    if (tor_rename(fname, fname2) < 0) {//XXXX sandbox prohibits
+    if (rename(fname, fname2) < 0) {
       log_warn(LD_BUG, "Weirdly, I couldn't even move the state aside. The "
                "OS gave an error of %s", strerror(errno));
     }
   }
   tor_free(fname2);
-}
-
-STATIC or_state_t *
-or_state_new(void)
-{
-  or_state_t *new_state = tor_malloc_zero(sizeof(or_state_t));
-  new_state->magic_ = OR_STATE_MAGIC;
-  config_init(&state_format, new_state);
-
-  return new_state;
 }
 
 /** Reload the persistent state from disk, generating a new state as needed.
@@ -331,7 +314,9 @@ or_state_load(void)
       log_warn(LD_GENERAL,"State file \"%s\" is not a file? Failing.", fname);
       goto done;
   }
-  new_state = or_state_new();
+  new_state = tor_malloc_zero(sizeof(or_state_t));
+  new_state->magic_ = OR_STATE_MAGIC;
+  config_init(&state_format, new_state);
   if (contents) {
     config_line_t *lines=NULL;
     int assign_retval;
@@ -366,7 +351,9 @@ or_state_load(void)
     tor_free(contents);
     config_free(&state_format, new_state);
 
-    new_state = or_state_new();
+    new_state = tor_malloc_zero(sizeof(or_state_t));
+    new_state->magic_ = OR_STATE_MAGIC;
+    config_init(&state_format, new_state);
   } else if (contents) {
     log_info(LD_GENERAL, "Loaded state from \"%s\"", fname);
   } else {
@@ -631,19 +618,10 @@ save_transport_to_state(const char *transport,
   tor_free(transport_addrport);
 }
 
-STATIC void
-or_state_free(or_state_t *state)
-{
-  if (!state)
-    return;
-
-  config_free(&state_format, state);
-}
-
 void
 or_state_free_all(void)
 {
-  or_state_free(global_state);
+  config_free(&state_format, global_state);
   global_state = NULL;
 }
 

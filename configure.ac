@@ -3,7 +3,7 @@ dnl Copyright (c) 2004-2006, Roger Dingledine, Nick Mathewson
 dnl Copyright (c) 2007-2013, The Tor Project, Inc.
 dnl See LICENSE for licensing information
 
-AC_INIT([tor],[0.2.6.0-alpha-dev])
+AC_INIT([tor],[0.2.5.2-alpha])
 AC_CONFIG_SRCDIR([src/or/main.c])
 AC_CONFIG_MACRO_DIR([m4])
 AM_INIT_AUTOMAKE
@@ -24,9 +24,7 @@ CPPFLAGS="$CPPFLAGS -I\${top_srcdir}/src/common"
 
 #XXXX020 We should make these enabled or not, before 0.2.0.x-final
 AC_ARG_ENABLE(buf-freelists,
-   AS_HELP_STRING(--enable-buf-freelists, enable freelists for buffer RAM))
-AC_ARG_ENABLE(mempools,
-   AS_HELP_STRING(--enable-mempools, enable mempools for relay cells))
+   AS_HELP_STRING(--disable-buf-freelists, disable freelists for buffer RAM))
 AC_ARG_ENABLE(openbsd-malloc,
    AS_HELP_STRING(--enable-openbsd-malloc, Use malloc code from openbsd.  Linux only))
 AC_ARG_ENABLE(instrument-downloads,
@@ -56,17 +54,10 @@ if test "$enable_static_tor" = "yes"; then
   CFLAGS="$CFLAGS -static"
 fi
 
-if test x$enable_buf_freelists = xyes; then
+if test x$enable_buf_freelists != xno; then
   AC_DEFINE(ENABLE_BUF_FREELISTS, 1,
             [Defined if we try to use freelists for buffer RAM chunks])
 fi
-
-AM_CONDITIONAL(USE_MEMPOOLS, test x$enable_mempools = xyes)
-if test x$enable_mempools = xyes; then
-  AC_DEFINE(ENABLE_MEMPOOLS, 1,
-            [Defined if we try to use mempools for cells being relayed])
-fi
-
 AM_CONDITIONAL(USE_OPENBSD_MALLOC, test x$enable_openbsd_malloc = xyes)
 if test x$enable_instrument_downloads = xyes; then
   AC_DEFINE(INSTRUMENT_DOWNLOADS, 1,
@@ -107,6 +98,26 @@ AC_ARG_ENABLE(upnp,
         * ) AC_MSG_ERROR(bad value for --enable-upnp) ;;
       esac], [upnp=false])
 
+
+AC_ARG_ENABLE(threads,
+     AS_HELP_STRING(--disable-threads, disable multi-threading support))
+
+if test x$enable_threads = x; then
+   case $host in
+    *-*-solaris* )
+     # Don't try multithreading on solaris -- cpuworkers seem to lock.
+     AC_MSG_NOTICE([You are running Solaris; Sometimes threading makes
+cpu workers lock up here, so I will disable threads.])
+     enable_threads="no";;
+    *)
+     enable_threads="yes";;
+   esac
+fi
+
+if test "$enable_threads" = "yes"; then
+  AC_DEFINE(ENABLE_THREADS, 1, [Defined if we will try to use multithreading])
+fi
+
 case $host in
    *-*-solaris* )
      AC_DEFINE(_REENTRANT, 1, [Define on some platforms to activate x_r() functions in time.h])
@@ -118,12 +129,12 @@ AC_ARG_ENABLE(gcc-warnings,
 AC_ARG_ENABLE(gcc-warnings-advisory,
      AS_HELP_STRING(--enable-gcc-warnings-advisory, [enable verbose warnings, excluding -Werror]))
 
+dnl Adam shostack suggests the following for Windows:
+dnl -D_FORTIFY_SOURCE=2 -fstack-protector-all
 dnl Others suggest '/gs /safeseh /nxcompat /dynamicbase' for non-gcc on Windows
+dnl This requires that we use gcc and that we add -O2 to the CFLAGS.
 AC_ARG_ENABLE(gcc-hardening,
     AS_HELP_STRING(--disable-gcc-hardening, disable compiler security checks))
-
-AC_ARG_ENABLE(expensive-hardening,
-    AS_HELP_STRING(--enable-expensive-hardening, enable more expensive compiler hardening; makes Tor slower))
 
 dnl Linker hardening options
 dnl Currently these options are ELF specific - you can't use this with MacOSX
@@ -149,9 +160,6 @@ AC_ARG_ENABLE(bufferevents,
 
 AC_ARG_ENABLE(tool-name-check,
      AS_HELP_STRING(--disable-tool-name-check, check for sanely named toolchain when cross-compiling))
-
-AC_ARG_ENABLE(seccomp,
-     AS_HELP_STRING(--disable-seccomp, do not attempt to use libseccomp))
 
 dnl check for the correct "ar" when cross-compiling
 AN_MAKEVAR([AR], [AC_PROG_AR])
@@ -183,7 +191,7 @@ AC_CHECK_PROG([SED],[sed],[sed],[/bin/false])
 
 dnl check for asciidoc and a2x
 AC_PATH_PROG([ASCIIDOC], [asciidoc], none)
-AC_PATH_PROGS([A2X], [a2x a2x.py], none)
+AC_PATH_PROG([A2X], [a2x], none)
 
 AM_CONDITIONAL(USE_ASCIIDOC, test x$asciidoc = xtrue)
 
@@ -193,7 +201,7 @@ AM_CONDITIONAL(MINIUPNPC, test x$upnp = xtrue)
 AM_PROG_CC_C_O
 
 AC_ARG_VAR(PYTHON)
-AC_CHECK_PROGS(PYTHON, [python python2 python2.7 python3 python3.3])
+AC_CHECK_PROGS(PYTHON, [python python2 python3])
 if test "x$PYTHON" = "x"; then
   AC_MSG_WARN([Python unavailable; some tests will not be run.])
 fi
@@ -306,8 +314,10 @@ if test "$LIBS" != "$saved_LIBS"; then
    have_rt=yes
 fi
 
-AC_SEARCH_LIBS(pthread_create, [pthread])
-AC_SEARCH_LIBS(pthread_detach, [pthread])
+if test "$enable_threads" = "yes"; then
+  AC_SEARCH_LIBS(pthread_create, [pthread])
+  AC_SEARCH_LIBS(pthread_detach, [pthread])
+fi
 
 dnl -------------------------------------------------------------------
 dnl Check for functions before libevent, since libevent-1.2 apparently
@@ -343,14 +353,12 @@ AC_CHECK_FUNCS(
         strtok_r \
         strtoull \
         sysconf \
-	sysctl \
         uname \
-        usleep \
         vasprintf \
 	_vscprintf
 )
 
-if test "$bwin32" != true; then
+if test "$enable_threads" = "yes"; then
   AC_CHECK_HEADERS(pthread.h)
   AC_CHECK_FUNCS(pthread_create)
 fi
@@ -425,14 +433,14 @@ AC_CHECK_FUNCS([event_get_version \
                 event_get_version_number \
                 event_get_method \
                 event_set_log_callback \
+                evdns_set_outgoing_bind_address \
                 evutil_secure_rng_set_urandom_device_file \
-                evutil_secure_rng_init \
                 event_base_loopexit])
 AC_CHECK_MEMBERS([struct event.min_heap_idx], , ,
 [#include <event.h>
 ])
 
-AC_CHECK_HEADERS(event2/event.h event2/dns.h)
+AC_CHECK_HEADERS(event2/event.h event2/dns.h event2/bufferevent_ssl.h)
 
 LIBS="$save_LIBS"
 LDFLAGS="$save_LDFLAGS"
@@ -620,12 +628,6 @@ if test x$enable_gcc_hardening != xno; then
     fi
 fi
 
-if test x$enable_expensive_hardening = xyes ; then
-   TOR_CHECK_CFLAGS([-fsanitize=address])
-   TOR_CHECK_CFLAGS([-fsanitize=undefined])
-   TOR_CHECK_CFLAGS([-fno-omit-frame-pointer])
-fi
-
 if test x$enable_linker_hardening != xno; then
     TOR_CHECK_LDFLAGS(-z relro -z now, "$all_ldflags_for_check", "$all_libs_for_check")
 fi
@@ -638,21 +640,13 @@ dnl Now see if we have a -fomit-frame-pointer compiler option.
 
 saved_CFLAGS="$CFLAGS"
 TOR_CHECK_CFLAGS(-fomit-frame-pointer)
-F_OMIT_FRAME_POINTER=''
 if test "$saved_CFLAGS" != "$CFLAGS"; then
-  if test x$enable_expensive_hardening != xyes ; then
-    F_OMIT_FRAME_POINTER='-fomit-frame-pointer'
-  fi
+  F_OMIT_FRAME_POINTER='-fomit-frame-pointer'
+else
+  F_OMIT_FRAME_POINTER=''
 fi
 CFLAGS="$saved_CFLAGS"
 AC_SUBST(F_OMIT_FRAME_POINTER)
-
-dnl ------------------------------------------------------
-dnl If we are adding -fomit-frame-pointer (or if the compiler's doing it
-dnl for us, as GCC 4.6 and later do at many optimization levels), then
-dnl we should try to add -fasynchronous-unwind-tables so that our backtrace
-dnl code will work.
-TOR_CHECK_CFLAGS(-fasynchronous-unwind-tables)
 
 dnl ------------------------------------------------------
 dnl Where do you live, libnatpmp?  And how do we call you?
@@ -716,10 +710,8 @@ fi
 dnl ============================================================
 dnl Check for libseccomp
 
-if test "x$enable_seccomp" != "xno"; then
-  AC_CHECK_HEADERS([seccomp.h])
-  AC_SEARCH_LIBS(seccomp_init, [seccomp])
-fi
+AC_CHECK_HEADERS([seccomp.h])
+AC_SEARCH_LIBS(seccomp_init, [seccomp])
 
 dnl ============================================================
 dnl We need an implementation of curve25519.
@@ -757,7 +749,7 @@ if test x$enable_curve25519 != xno; then
         ])],
 	[tor_cv_can_use_curve25519_donna_c64=yes],
         [tor_cv_can_use_curve25519_donna_c64=no],
-	[AC_LINK_IFELSE(
+	[AC_COMPILE_IFELSE(
           [AC_LANG_PROGRAM([dnl
         #include <stdint.h>
         typedef unsigned uint128_t __attribute__((mode(TI)));
@@ -877,9 +869,7 @@ AC_CHECK_HEADERS(
         sys/param.h \
         sys/prctl.h \
         sys/resource.h \
-        sys/select.h \
         sys/socket.h \
-	sys/sysctl.h \
         sys/syslimits.h \
         sys/time.h \
         sys/types.h \
@@ -1223,6 +1213,7 @@ if [[ $dmalloc -eq 1 ]]; then
   AC_CHECK_HEADERS(dmalloc.h, , AC_MSG_ERROR(dmalloc header file not found. Do you have the development files for dmalloc installed?))
   AC_SEARCH_LIBS(dmalloc_malloc, [dmallocth dmalloc], , AC_MSG_ERROR(Libdmalloc library not found. If you enable it you better have it installed.))
   AC_DEFINE(USE_DMALLOC, 1, [Debug memory allocation library])
+  AC_DEFINE(DMALLOC_FUNC_CHECK, 1, [Enable dmalloc's malloc function check])
   AC_CHECK_FUNCS(dmalloc_strdup dmalloc_strndup)
 fi
 
@@ -1549,11 +1540,10 @@ CPPFLAGS="$CPPFLAGS $TOR_CPPFLAGS_libevent $TOR_CPPFLAGS_openssl $TOR_CPPFLAGS_z
 AC_CONFIG_FILES([
         Doxyfile
         Makefile
-        contrib/dist/suse/tor.sh
-        contrib/operator-tools/tor.logrotate
-        contrib/dist/tor.sh
-        contrib/dist/torctl
-        contrib/dist/tor.service
+        contrib/suse/tor.sh
+        contrib/tor.logrotate
+        contrib/tor.sh
+        contrib/torctl
         src/config/torrc.sample
 ])
 
@@ -1575,6 +1565,6 @@ fi
 
 AC_OUTPUT
 
-if test -x /usr/bin/perl && test -x ./scripts/maint/updateVersions.pl ; then
-  ./scripts/maint/updateVersions.pl
+if test -x /usr/bin/perl && test -x ./contrib/updateVersions.pl ; then
+  ./contrib/updateVersions.pl
 fi

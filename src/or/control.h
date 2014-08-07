@@ -85,7 +85,6 @@ int control_event_buildtimeout_set(buildtimeout_set_event_t type,
 int control_event_signal(uintptr_t signal);
 
 int init_control_cookie_authentication(int enabled);
-char *get_controller_cookie_file_name(void);
 smartlist_t *decode_hashed_passwords(config_line_t *passwords);
 void disable_control_logging(void);
 void enable_control_logging(void);
@@ -94,8 +93,7 @@ void monitor_owning_controller_process(const char *process_spec);
 
 void control_event_bootstrap(bootstrap_status_t status, int progress);
 MOCK_DECL(void, control_event_bootstrap_problem,(const char *warn,
-                                                 int reason,
-                                                 or_connection_t *or_conn));
+                                                 int reason));
 
 void control_event_clients_seen(const char *controller_str);
 void control_event_transport_launched(const char *mode,

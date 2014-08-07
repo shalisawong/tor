@@ -414,6 +414,12 @@ cpuworker_main(void *data)
   cpuworker_reply_t rpl;
 
   fd = fdarray[1]; /* this side is ours */
+#ifndef TOR_IS_MULTITHREADED
+  tor_close_socket(fdarray[0]); /* this is the side of the socketpair the
+                                 * parent uses */
+  tor_free_all(1); /* so the child doesn't hold the parent's fd's open */
+  handle_signals(0); /* ignore interrupts from the keyboard, etc */
+#endif
   tor_free(data);
 
   setup_server_onion_keys(&onion_keys);
@@ -430,7 +436,7 @@ cpuworker_main(void *data)
     if (req.task == CPUWORKER_TASK_ONION) {
       const create_cell_t *cc = &req.create_cell;
       created_cell_t *cell_out = &rpl.created_cell;
-      struct timeval tv_start = {0,0}, tv_end;
+      struct timeval tv_start, tv_end;
       int n;
       rpl.timed = req.timed;
       rpl.started_at = req.started_at;
@@ -522,13 +528,12 @@ spawn_cpuworker(void)
   tor_assert(SOCKET_OK(fdarray[1]));
 
   fd = fdarray[0];
-  if (spawn_func(cpuworker_main, (void*)fdarray) < 0) {
-    tor_close_socket(fdarray[0]);
-    tor_close_socket(fdarray[1]);
-    tor_free(fdarray);
-    return -1;
-  }
+  spawn_func(cpuworker_main, (void*)fdarray);
   log_debug(LD_OR,"just spawned a cpu worker.");
+#ifndef TOR_IS_MULTITHREADED
+  tor_close_socket(fdarray[1]); /* don't need the worker's side of the pipe */
+  tor_free(fdarray);
+#endif
 
   conn = connection_new(CONN_TYPE_CPUWORKER, AF_UNIX);
 
@@ -681,7 +686,7 @@ assign_onionskin_to_cpuworker(connection_t *cpuworker,
     }
 
     if (connection_or_digest_is_known_relay(circ->p_chan->identity_digest))
-      rep_hist_note_circuit_handshake_assigned(onionskin->handshake_type);
+      rep_hist_note_circuit_handshake_completed(onionskin->handshake_type);
 
     should_time = should_time_request(onionskin->handshake_type);
     memset(&req, 0, sizeof(req));

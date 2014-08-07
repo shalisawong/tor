@@ -82,7 +82,8 @@ static void dir_microdesc_download_failed(smartlist_t *failed,
 static void note_client_request(int purpose, int compressed, size_t bytes);
 static int client_likes_consensus(networkstatus_t *v, const char *want_url);
 
-static void directory_initiate_command_rend(const tor_addr_t *addr,
+static void directory_initiate_command_rend(const char *address,
+                                            const tor_addr_t *addr,
                                             uint16_t or_port,
                                             uint16_t dir_port,
                                             const char *digest,
@@ -148,6 +149,8 @@ authdir_type_to_string(dirinfo_type_t auth)
 {
   char *result;
   smartlist_t *lst = smartlist_new();
+  if (auth & V1_DIRINFO)
+    smartlist_add(lst, (void*)"V1");
   if (auth & V3_DIRINFO)
     smartlist_add(lst, (void*)"V3");
   if (auth & BRIDGE_DIRINFO)
@@ -167,8 +170,12 @@ dir_conn_purpose_to_string(int purpose)
 {
   switch (purpose)
     {
+    case DIR_PURPOSE_FETCH_RENDDESC:
+      return "hidden-service descriptor fetch";
     case DIR_PURPOSE_UPLOAD_DIR:
       return "server descriptor upload";
+    case DIR_PURPOSE_UPLOAD_RENDDESC:
+      return "hidden-service descriptor upload";
     case DIR_PURPOSE_UPLOAD_VOTE:
       return "server vote upload";
     case DIR_PURPOSE_UPLOAD_SIGNATURES:
@@ -197,9 +204,9 @@ dir_conn_purpose_to_string(int purpose)
   return "(unknown)";
 }
 
-/** Return true iff <b>identity_digest</b> is the digest of a router which
- * says that it caches extrainfos.  (If <b>is_authority</b> we always
- * believe that to be true.) */
+/** Return true iff <b>identity_digest</b> is the digest of a router we
+ * believe to support extrainfo downloads.  (If <b>is_authority</b> we do
+ * additional checking that's only valid for authorities.) */
 int
 router_supports_extrainfo(const char *identity_digest, int is_authority)
 {
@@ -240,13 +247,13 @@ directories_have_accepted_server_descriptor(void)
 /** Start a connection to every suitable directory authority, using
  * connection purpose <b>dir_purpose</b> and uploading <b>payload</b>
  * (of length <b>payload_len</b>). The dir_purpose should be one of
- * 'DIR_PURPOSE_UPLOAD_{DIR|VOTE|SIGNATURES}'.
+ * 'DIR_PURPOSE_UPLOAD_DIR' or 'DIR_PURPOSE_UPLOAD_RENDDESC'.
  *
  * <b>router_purpose</b> describes the type of descriptor we're
  * publishing, if we're publishing a descriptor -- e.g. general or bridge.
  *
- * <b>type</b> specifies what sort of dir authorities (V3,
- * BRIDGE, etc) we should upload to.
+ * <b>type</b> specifies what sort of dir authorities (V1, V3,
+ * HIDSERV, BRIDGE, etc) we should upload to.
  *
  * If <b>extrainfo_len</b> is nonzero, the first <b>payload_len</b> bytes of
  * <b>payload</b> hold a router descriptor, and the next <b>extrainfo_len</b>
@@ -261,7 +268,7 @@ directory_post_to_dirservers(uint8_t dir_purpose, uint8_t router_purpose,
                              size_t payload_len, size_t extrainfo_len)
 {
   const or_options_t *options = get_options();
-  dir_indirection_t indirection;
+  int post_via_tor;
   const smartlist_t *dirservers = router_get_trusted_dir_servers();
   int found = 0;
   const int exclude_self = (dir_purpose == DIR_PURPOSE_UPLOAD_VOTE ||
@@ -305,19 +312,11 @@ directory_post_to_dirservers(uint8_t dir_purpose, uint8_t router_purpose,
                  (int) extrainfo_len);
       }
       tor_addr_from_ipv4h(&ds_addr, ds->addr);
-      if (purpose_needs_anonymity(dir_purpose, router_purpose)) {
-        indirection = DIRIND_ANONYMOUS;
-      } else if (!fascist_firewall_allows_address_dir(&ds_addr,ds->dir_port)) {
-        if (fascist_firewall_allows_address_or(&ds_addr,ds->or_port))
-          indirection = DIRIND_ONEHOP;
-        else
-          indirection = DIRIND_ANONYMOUS;
-      } else {
-        indirection = DIRIND_DIRECT_CONN;
-      }
+      post_via_tor = purpose_needs_anonymity(dir_purpose, router_purpose) ||
+        !fascist_firewall_allows_address_dir(&ds_addr, ds->dir_port);
       directory_initiate_command_routerstatus(rs, dir_purpose,
                                               router_purpose,
-                                              indirection,
+                                              post_via_tor,
                                               NULL, payload, upload_len, 0);
   } SMARTLIST_FOREACH_END(ds);
   if (!found) {
@@ -345,6 +344,8 @@ should_use_directory_guards(const or_options_t *options)
    * nonstandard type, don't use directory guards. */
   if (options->DownloadExtraInfo || options->FetchDirInfoEarly ||
       options->FetchDirInfoExtraEarly || options->FetchUselessDescriptors)
+    return 0;
+  if (! options->PreferTunneledDirConns)
     return 0;
   return 1;
 }
@@ -409,6 +410,9 @@ directory_get_from_dirserver(uint8_t dir_purpose, uint8_t router_purpose,
       type = (router_purpose == ROUTER_PURPOSE_BRIDGE ? BRIDGE_DIRINFO :
                                                         V3_DIRINFO);
       break;
+    case DIR_PURPOSE_FETCH_RENDDESC:
+      type = HIDSERV_DIRINFO;
+      break;
     case DIR_PURPOSE_FETCH_STATUS_VOTE:
     case DIR_PURPOSE_FETCH_DETACHED_SIGNATURES:
     case DIR_PURPOSE_FETCH_CERTIFICATE:
@@ -448,7 +452,7 @@ directory_get_from_dirserver(uint8_t dir_purpose, uint8_t router_purpose,
     }
   }
 
-  if (!options->FetchServerDescriptors)
+  if (!options->FetchServerDescriptors && type != HIDSERV_DIRINFO)
     return;
 
   if (!get_via_tor) {
@@ -467,7 +471,7 @@ directory_get_from_dirserver(uint8_t dir_purpose, uint8_t router_purpose,
         tor_addr_t addr;
         routerinfo_t *ri = node->ri;
         node_get_addr(node, &addr);
-        directory_initiate_command(&addr,
+        directory_initiate_command(ri->address, &addr,
                                    ri->or_port, 0/*no dirport*/,
                                    ri->cache_info.identity_digest,
                                    dir_purpose,
@@ -519,7 +523,11 @@ directory_get_from_dirserver(uint8_t dir_purpose, uint8_t router_purpose,
     }
   } else { /* get_via_tor */
     /* Never use fascistfirewall; we're going via Tor. */
-    if (1) {
+    if (dir_purpose == DIR_PURPOSE_FETCH_RENDDESC) {
+      /* only ask hidserv authorities, any of them will do */
+      pds_flags |= PDS_IGNORE_FASCISTFIREWALL|PDS_ALLOW_SELF;
+      rs = router_pick_trusteddirserver(HIDSERV_DIRINFO, pds_flags);
+    } else {
       /* anybody with a non-zero dirport will do. Disregard firewalls. */
       pds_flags |= PDS_IGNORE_FASCISTFIREWALL;
       rs = router_pick_directory_server(type, pds_flags);
@@ -596,6 +604,9 @@ directory_initiate_command_routerstatus_rend(const routerstatus_t *status,
 {
   const or_options_t *options = get_options();
   const node_t *node;
+  char address_buf[INET_NTOA_BUF_LEN+1];
+  struct in_addr in;
+  const char *address;
   tor_addr_t addr;
   const int anonymized_connection = dirind_is_anon(indirection);
   node = node_get_by_id(status->identity_digest);
@@ -605,6 +616,13 @@ directory_initiate_command_routerstatus_rend(const routerstatus_t *status,
              "don't have its router descriptor.",
              routerstatus_describe(status));
     return;
+  } else if (node) {
+    node_get_address_string(node, address_buf, sizeof(address_buf));
+    address = address_buf;
+  } else {
+    in.s_addr = htonl(status->addr);
+    tor_inet_ntoa(&in, address_buf, sizeof(address_buf));
+    address = address_buf;
   }
   tor_addr_from_ipv4h(&addr, status->addr);
 
@@ -618,7 +636,7 @@ directory_initiate_command_routerstatus_rend(const routerstatus_t *status,
     return;
   }
 
-  directory_initiate_command_rend(&addr,
+  directory_initiate_command_rend(address, &addr,
                              status->or_port, status->dir_port,
                              status->identity_digest,
                              dir_purpose, router_purpose,
@@ -631,7 +649,7 @@ directory_initiate_command_routerstatus_rend(const routerstatus_t *status,
  * upload or download a server or rendezvous
  * descriptor. <b>dir_purpose</b> determines what
  * kind of directory connection we're launching, and must be one of
- * DIR_PURPOSE_{FETCH|UPLOAD}_{DIR|RENDDESC_V2}. <b>router_purpose</b>
+ * DIR_PURPOSE_{FETCH|UPLOAD}_{DIR|RENDDESC|RENDDESC_V2}. <b>router_purpose</b>
  * specifies the descriptor purposes we have in mind (currently only
  * used for FETCH_DIR).
  *
@@ -840,7 +858,6 @@ directory_command_should_use_begindir(const or_options_t *options,
                                       int or_port, uint8_t router_purpose,
                                       dir_indirection_t indirection)
 {
-  (void) router_purpose;
   if (!or_port)
     return 0; /* We don't know an ORPort -- no chance. */
   if (indirection == DIRIND_DIRECT_CONN || indirection == DIRIND_ANON_DIRPORT)
@@ -849,6 +866,9 @@ directory_command_should_use_begindir(const or_options_t *options,
     if (!fascist_firewall_allows_address_or(addr, or_port) ||
         directory_fetches_from_authorities(options))
       return 0; /* We're firewalled or are acting like a relay -- also no. */
+  if (!options->TunnelDirConns &&
+      router_purpose != ROUTER_PURPOSE_BRIDGE)
+    return 0; /* We prefer to avoid using begindir conns. Fine. */
   return 1;
 }
 
@@ -858,7 +878,7 @@ directory_command_should_use_begindir(const or_options_t *options,
  * <b>supports_begindir</b>, and whose identity key digest is
  * <b>digest</b>. */
 void
-directory_initiate_command(const tor_addr_t *_addr,
+directory_initiate_command(const char *address, const tor_addr_t *_addr,
                            uint16_t or_port, uint16_t dir_port,
                            const char *digest,
                            uint8_t dir_purpose, uint8_t router_purpose,
@@ -866,7 +886,7 @@ directory_initiate_command(const tor_addr_t *_addr,
                            const char *payload, size_t payload_len,
                            time_t if_modified_since)
 {
-  directory_initiate_command_rend(_addr, or_port, dir_port,
+  directory_initiate_command_rend(address, _addr, or_port, dir_port,
                              digest, dir_purpose,
                              router_purpose, indirection,
                              resource, payload, payload_len,
@@ -880,7 +900,9 @@ directory_initiate_command(const tor_addr_t *_addr,
 static int
 is_sensitive_dir_purpose(uint8_t dir_purpose)
 {
-  return ((dir_purpose == DIR_PURPOSE_HAS_FETCHED_RENDDESC_V2) ||
+  return ((dir_purpose == DIR_PURPOSE_FETCH_RENDDESC) ||
+          (dir_purpose == DIR_PURPOSE_HAS_FETCHED_RENDDESC) ||
+          (dir_purpose == DIR_PURPOSE_UPLOAD_RENDDESC) ||
           (dir_purpose == DIR_PURPOSE_UPLOAD_RENDDESC_V2) ||
           (dir_purpose == DIR_PURPOSE_FETCH_RENDDESC_V2));
 }
@@ -888,7 +910,7 @@ is_sensitive_dir_purpose(uint8_t dir_purpose)
 /** Same as directory_initiate_command(), but accepts rendezvous data to
  * fetch a hidden service descriptor. */
 static void
-directory_initiate_command_rend(const tor_addr_t *_addr,
+directory_initiate_command_rend(const char *address, const tor_addr_t *_addr,
                                 uint16_t or_port, uint16_t dir_port,
                                 const char *digest,
                                 uint8_t dir_purpose, uint8_t router_purpose,
@@ -906,6 +928,7 @@ directory_initiate_command_rend(const tor_addr_t *_addr,
   const int anonymized_connection = dirind_is_anon(indirection);
   tor_addr_t addr;
 
+  tor_assert(address);
   tor_assert(_addr);
   tor_assert(or_port || dir_port);
   tor_assert(digest);
@@ -938,7 +961,7 @@ directory_initiate_command_rend(const tor_addr_t *_addr,
   /* set up conn so it's got all the data we need to remember */
   tor_addr_copy(&conn->base_.addr, &addr);
   conn->base_.port = use_begindir ? or_port : dir_port;
-  conn->base_.address = tor_dup_addr(&addr);
+  conn->base_.address = tor_strdup(address);
   memcpy(conn->identity_digest, digest, DIGEST_LEN);
 
   conn->base_.purpose = dir_purpose;
@@ -1244,6 +1267,12 @@ directory_send_command(dir_connection_t *conn,
       httpcommand = "GET";
       tor_asprintf(&url, "/tor/rendezvous2/%s", resource);
       break;
+    case DIR_PURPOSE_UPLOAD_RENDDESC:
+      tor_assert(!resource);
+      tor_assert(payload);
+      httpcommand = "POST";
+      url = tor_strdup("/tor/rendezvous/publish");
+      break;
     case DIR_PURPOSE_UPLOAD_RENDDESC_V2:
       tor_assert(!resource);
       tor_assert(payload);
@@ -1387,14 +1416,13 @@ http_set_address_origin(const char *headers, connection_t *conn)
   if (!fwd)
     fwd = http_get_header(headers, "X-Forwarded-For: ");
   if (fwd) {
-    tor_addr_t toraddr;
-    if (tor_addr_parse(&toraddr,fwd) == -1 ||
-        tor_addr_is_internal(&toraddr,0)) {
-      log_debug(LD_DIR, "Ignoring local/internal IP %s", escaped(fwd));
+    struct in_addr in;
+    if (!tor_inet_aton(fwd, &in) || is_internal_IP(ntohl(in.s_addr), 0)) {
+      log_debug(LD_DIR, "Ignoring unrecognized or internal IP %s",
+                escaped(fwd));
       tor_free(fwd);
       return;
     }
-
     tor_free(conn->address);
     conn->address = tor_strdup(fwd);
     tor_free(fwd);
@@ -1491,8 +1519,8 @@ parse_http_response(const char *headers, int *code, time_t *date,
 }
 
 /** Return true iff <b>body</b> doesn't start with a plausible router or
- * network-status or microdescriptor opening.  This is a sign of possible
- * compression. */
+ * running-list or directory opening.  This is a sign of possible compression.
+ **/
 static int
 body_is_plausible(const char *body, size_t len, int purpose)
 {
@@ -1504,16 +1532,20 @@ body_is_plausible(const char *body, size_t len, int purpose)
   if (purpose == DIR_PURPOSE_FETCH_MICRODESC) {
     return (!strcmpstart(body,"onion-key"));
   }
-  if (1) {
+  if (purpose != DIR_PURPOSE_FETCH_RENDDESC) {
     if (!strcmpstart(body,"router") ||
-        !strcmpstart(body,"network-status"))
-      return 1;
+        !strcmpstart(body,"signed-directory") ||
+        !strcmpstart(body,"network-status") ||
+        !strcmpstart(body,"running-routers"))
+    return 1;
     for (i=0;i<32;++i) {
       if (!TOR_ISPRINT(body[i]) && !TOR_ISSPACE(body[i]))
         return 0;
     }
+    return 1;
+  } else {
+    return 1;
   }
-  return 1;
 }
 
 /** Called when we've just fetched a bunch of router descriptors in
@@ -2072,6 +2104,46 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
      * dirservers down just because they don't like us. */
   }
 
+  if (conn->base_.purpose == DIR_PURPOSE_FETCH_RENDDESC) {
+    tor_assert(conn->rend_data);
+    log_info(LD_REND,"Received rendezvous descriptor (size %d, status %d "
+             "(%s))",
+             (int)body_len, status_code, escaped(reason));
+    switch (status_code) {
+      case 200:
+        if (rend_cache_store(body, body_len, 0,
+                             conn->rend_data->onion_address) < -1) {
+          log_warn(LD_REND,"Failed to parse rendezvous descriptor.");
+          /* Any pending rendezvous attempts will notice when
+           * connection_about_to_close_connection()
+           * cleans this dir conn up. */
+          /* We could retry. But since v0 descriptors are going out of
+           * style, it isn't worth the hassle. We'll do better in v2. */
+        } else {
+          /* Success, or at least there's a v2 descriptor already
+           * present. Notify pending connections about this. */
+          conn->base_.purpose = DIR_PURPOSE_HAS_FETCHED_RENDDESC;
+          rend_client_desc_trynow(conn->rend_data->onion_address);
+        }
+        break;
+      case 404:
+        /* Not there. Pending connections will be notified when
+         * connection_about_to_close_connection() cleans this conn up. */
+        break;
+      case 400:
+        log_warn(LD_REND,
+                 "http status 400 (%s). Dirserver didn't like our "
+                 "rendezvous query?", escaped(reason));
+        break;
+      default:
+        log_warn(LD_REND,"http status %d (%s) response unexpected while "
+                 "fetching hidden service descriptor (server '%s:%d').",
+                 status_code, escaped(reason), conn->base_.address,
+                 conn->base_.port);
+        break;
+    }
+  }
+
   if (conn->base_.purpose == DIR_PURPOSE_FETCH_RENDDESC_V2) {
     #define SEND_HS_DESC_FAILED_EVENT() ( \
       control_event_hs_descriptor_failed(conn->rend_data, \
@@ -2083,22 +2155,27 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
     switch (status_code) {
       case 200:
         switch (rend_cache_store_v2_desc_as_client(body, conn->rend_data)) {
-          case RCS_BADDESC:
-          case RCS_NOTDIR: /* Impossible */
+          case -2:
             log_warn(LD_REND,"Fetching v2 rendezvous descriptor failed. "
                      "Retrying at another directory.");
             /* We'll retry when connection_about_to_close_connection()
              * cleans this dir conn up. */
             SEND_HS_DESC_FAILED_EVENT();
             break;
-          case RCS_OKAY:
+          case -1:
+            /* We already have a v0 descriptor here. Ignoring this one
+             * and _not_ performing another request. */
+            log_info(LD_REND, "Successfully fetched v2 rendezvous "
+                     "descriptor, but we already have a v0 descriptor.");
+            conn->base_.purpose = DIR_PURPOSE_HAS_FETCHED_RENDDESC;
+            break;
           default:
             /* success. notify pending connections about this. */
             log_info(LD_REND, "Successfully fetched v2 rendezvous "
                      "descriptor.");
             control_event_hs_descriptor_received(conn->rend_data,
                                                  conn->identity_digest);
-            conn->base_.purpose = DIR_PURPOSE_HAS_FETCHED_RENDDESC_V2;
+            conn->base_.purpose = DIR_PURPOSE_HAS_FETCHED_RENDDESC;
             rend_client_desc_trynow(conn->rend_data->onion_address);
             break;
         }
@@ -2129,7 +2206,8 @@ connection_dir_client_reached_eof(dir_connection_t *conn)
     }
   }
 
-  if (conn->base_.purpose == DIR_PURPOSE_UPLOAD_RENDDESC_V2) {
+  if (conn->base_.purpose == DIR_PURPOSE_UPLOAD_RENDDESC ||
+      conn->base_.purpose == DIR_PURPOSE_UPLOAD_RENDDESC_V2) {
     log_info(LD_REND,"Uploaded rendezvous descriptor (status %d "
              "(%s))",
              status_code, escaped(reason));
@@ -2233,7 +2311,7 @@ connection_dir_about_to_close(dir_connection_t *dir_conn)
   }
   /* If we were trying to fetch a v2 rend desc and did not succeed,
    * retry as needed. (If a fetch is successful, the connection state
-   * is changed to DIR_PURPOSE_HAS_FETCHED_RENDDESC_V2 to mark that
+   * is changed to DIR_PURPOSE_HAS_FETCHED_RENDDESC to mark that
    * refetching is unnecessary.) */
   if (conn->purpose == DIR_PURPOSE_FETCH_RENDDESC_V2 &&
       dir_conn->rend_data &&
@@ -2307,7 +2385,7 @@ write_http_response_header_impl(dir_connection_t *conn, ssize_t length,
   }
   if (cache_lifetime > 0) {
     char expbuf[RFC1123_TIME_LEN+1];
-    format_rfc1123_time(expbuf, (time_t)(now + cache_lifetime));
+    format_rfc1123_time(expbuf, now + cache_lifetime);
     /* We could say 'Cache-control: max-age=%d' here if we start doing
      * http/1.1 */
     tor_snprintf(cp, sizeof(tmp)-(cp-tmp),
@@ -2374,7 +2452,9 @@ note_client_request(int purpose, int compressed, size_t bytes)
     case DIR_PURPOSE_UPLOAD_DIR:          kind = "dl/ul-dir"; break;
     case DIR_PURPOSE_UPLOAD_VOTE:         kind = "dl/ul-vote"; break;
     case DIR_PURPOSE_UPLOAD_SIGNATURES:   kind = "dl/ul-sig"; break;
+    case DIR_PURPOSE_FETCH_RENDDESC:      kind = "dl/rend"; break;
     case DIR_PURPOSE_FETCH_RENDDESC_V2:   kind = "dl/rend2"; break;
+    case DIR_PURPOSE_UPLOAD_RENDDESC:     kind = "dl/ul-rend"; break;
     case DIR_PURPOSE_UPLOAD_RENDDESC_V2:  kind = "dl/ul-rend2"; break;
   }
   if (kind) {
@@ -2584,6 +2664,75 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
       goto done;
     }
     /* if no disclaimer file, fall through and continue */
+  }
+
+  if (!strcmp(url,"/tor/") || !strcmp(url,"/tor/dir")) { /* v1 dir fetch */
+    cached_dir_t *d = dirserv_get_directory();
+
+    if (!d) {
+      log_info(LD_DIRSERV,"Client asked for the mirrored directory, but we "
+               "don't have a good one yet. Sending 503 Dir not available.");
+      write_http_status_line(conn, 503, "Directory unavailable");
+      goto done;
+    }
+    if (d->published < if_modified_since) {
+      write_http_status_line(conn, 304, "Not modified");
+      goto done;
+    }
+
+    dlen = compressed ? d->dir_z_len : d->dir_len;
+
+    if (global_write_bucket_low(TO_CONN(conn), dlen, 1)) {
+      log_debug(LD_DIRSERV,
+               "Client asked for the mirrored directory, but we've been "
+               "writing too many bytes lately. Sending 503 Dir busy.");
+      write_http_status_line(conn, 503, "Directory busy, try again later");
+      goto done;
+    }
+
+    note_request(url, dlen);
+
+    log_debug(LD_DIRSERV,"Dumping %sdirectory to client.",
+              compressed?"compressed ":"");
+    write_http_response_header(conn, dlen, compressed,
+                          FULL_DIR_CACHE_LIFETIME);
+    conn->cached_dir = d;
+    conn->cached_dir_offset = 0;
+    if (!compressed)
+      conn->zlib_state = tor_zlib_new(0, ZLIB_METHOD);
+    ++d->refcnt;
+
+    /* Prime the connection with some data. */
+    conn->dir_spool_src = DIR_SPOOL_CACHED_DIR;
+    connection_dirserv_flushed_some(conn);
+    goto done;
+  }
+
+  if (!strcmp(url,"/tor/running-routers")) { /* running-routers fetch */
+    cached_dir_t *d = dirserv_get_runningrouters();
+    if (!d) {
+      write_http_status_line(conn, 503, "Directory unavailable");
+      goto done;
+    }
+    if (d->published < if_modified_since) {
+      write_http_status_line(conn, 304, "Not modified");
+      goto done;
+    }
+    dlen = compressed ? d->dir_z_len : d->dir_len;
+
+    if (global_write_bucket_low(TO_CONN(conn), dlen, 1)) {
+      log_info(LD_DIRSERV,
+               "Client asked for running-routers, but we've been "
+               "writing too many bytes lately. Sending 503 Dir busy.");
+      write_http_status_line(conn, 503, "Directory busy, try again later");
+      goto done;
+    }
+    note_request(url, dlen);
+    write_http_response_header(conn, dlen, compressed,
+                 RUNNINGROUTERS_CACHE_LIFETIME);
+    connection_write_to_buf(compressed ? d->dir_z : d->dir, dlen,
+                            TO_CONN(conn));
+    goto done;
   }
 
   if (!strcmpstart(url, "/tor/status-vote/current/consensus")) {
@@ -3073,6 +3222,22 @@ directory_handle_command_get(dir_connection_t *conn, const char *headers,
     goto done;
   }
 
+  if (!strcmp(url,"/tor/dbg-stability.txt")) {
+    const char *stability;
+    size_t len;
+    if (options->BridgeAuthoritativeDir ||
+        ! authdir_mode_tests_reachability(options) ||
+        ! (stability = rep_hist_get_router_stability_doc(time(NULL)))) {
+      write_http_status_line(conn, 404, "Not found.");
+      goto done;
+    }
+
+    len = strlen(stability);
+    write_http_response_header(conn, len, 0, 0);
+    connection_write_to_buf(stability, len, TO_CONN(conn));
+    goto done;
+  }
+
 #if defined(EXPORTMALLINFO) && defined(HAVE_MALLOC_H) && defined(HAVE_MALLINFO)
 #define ADD_MALLINFO_LINE(x) do {                               \
     smartlist_add_asprintf(lines, "%s %d\n", #x, mi.x);        \
@@ -3147,20 +3312,19 @@ directory_handle_command_post(dir_connection_t *conn, const char *headers,
       connection_dir_is_encrypted(conn) &&
       !strcmpstart(url,"/tor/rendezvous2/publish")) {
     switch (rend_cache_store_v2_desc_as_dir(body)) {
-      case RCS_NOTDIR:
+      case -2:
         log_info(LD_REND, "Rejected v2 rend descriptor (length %d) from %s "
                  "since we're not currently a hidden service directory.",
                  (int)body_len, conn->base_.address);
         write_http_status_line(conn, 503, "Currently not acting as v2 "
                                "hidden service directory");
         break;
-      case RCS_BADDESC:
+      case -1:
         log_warn(LD_REND, "Rejected v2 rend descriptor (length %d) from %s.",
                  (int)body_len, conn->base_.address);
         write_http_status_line(conn, 400,
                                "Invalid v2 service descriptor rejected");
         break;
-      case RCS_OKAY:
       default:
         write_http_status_line(conn, 200, "Service descriptor (v2) stored");
         log_info(LD_REND, "Handled v2 rendezvous descriptor post: accepted");
@@ -3184,6 +3348,8 @@ directory_handle_command_post(dir_connection_t *conn, const char *headers,
     was_router_added_t r = dirserv_add_multiple_descriptors(body, purpose,
                                              conn->base_.address, &msg);
     tor_assert(msg);
+    if (WRA_WAS_ADDED(r))
+      dirserv_get_directory(); /* rebuild and write to disk */
 
     if (r == ROUTER_ADDED_NOTIFY_GENERATOR) {
       /* Accepted with a message. */

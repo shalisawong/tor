@@ -16,10 +16,7 @@ test_cq_manip(void *arg)
   cell_t cell;
   (void) arg;
 
-#ifdef ENABLE_MEMPOOLS
   init_cell_pool();
-#endif /* ENABLE_MEMPOOLS */
-
   cell_queue_init(&cq);
   tt_int_op(cq.n, ==, 0);
 
@@ -99,10 +96,7 @@ test_cq_manip(void *arg)
   packed_cell_free(pc_tmp);
 
   cell_queue_clear(&cq);
-
-#ifdef ENABLE_MEMPOOLS
   free_cell_pool();
-#endif /* ENABLE_MEMPOOLS */
 }
 
 static void
@@ -114,9 +108,7 @@ test_circuit_n_cells(void *arg)
 
   (void)arg;
 
-#ifdef ENABLE_MEMPOOLS
   init_cell_pool();
-#endif /* ENABLE_MEMPOOLS */
 
   pc1 = packed_cell_new();
   pc2 = packed_cell_new();
@@ -145,9 +137,7 @@ test_circuit_n_cells(void *arg)
   circuit_free(TO_CIRCUIT(or_c));
   circuit_free(TO_CIRCUIT(origin_c));
 
-#ifdef ENABLE_MEMPOOLS
   free_cell_pool();
-#endif /* ENABLE_MEMPOOLS */
 }
 
 struct testcase_t cell_queue_tests[] = {

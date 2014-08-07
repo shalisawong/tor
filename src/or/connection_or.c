@@ -215,7 +215,7 @@ connection_or_clear_ext_or_id_map(void)
   orconn_ext_or_id_map = NULL;
 }
 
-/** Creates an Extended ORPort identifier for <b>conn</b> and deposits
+/** Creates an Extended ORPort identifier for <b>conn<b/> and deposits
  *  it into the global list of identifiers. */
 void
 connection_or_set_ext_or_identifier(or_connection_t *conn)
@@ -714,8 +714,7 @@ connection_or_about_to_close(or_connection_t *or_conn)
                                      reason);
         if (!authdir_mode_tests_reachability(options))
           control_event_bootstrap_problem(
-                orconn_end_reason_to_control_string(reason),
-                reason, or_conn);
+                orconn_end_reason_to_control_string(reason), reason);
       }
     }
   } else if (conn->hold_open_until_flushed) {
@@ -826,45 +825,6 @@ connection_or_update_token_buckets(smartlist_t *conns,
   });
 }
 
-/** How long do we wait before killing non-canonical OR connections with no
- * circuits?  In Tor versions up to 0.2.1.25 and 0.2.2.12-alpha, we waited 15
- * minutes before cancelling these connections, which caused fast relays to
- * accrue many many idle connections. Hopefully 3-4.5 minutes is low enough
- * that it kills most idle connections, without being so low that we cause
- * clients to bounce on and off.
- *
- * For canonical connections, the limit is higher, at 15-22.5 minutes.
- *
- * For each OR connection, we randomly add up to 50% extra to its idle_timeout
- * field, to avoid exposing when exactly the last circuit closed.  Since we're
- * storing idle_timeout in a uint16_t, don't let these values get higher than
- * 12 hours or so without revising connection_or_set_canonical and/or expanding
- * idle_timeout.
- */
-#define IDLE_OR_CONN_TIMEOUT_NONCANONICAL 180
-#define IDLE_OR_CONN_TIMEOUT_CANONICAL 900
-
-/* Mark <b>or_conn</b> as canonical if <b>is_canonical</b> is set, and
- * non-canonical otherwise. Adjust idle_timeout accordingly.
- */
-void
-connection_or_set_canonical(or_connection_t *or_conn,
-                            int is_canonical)
-{
-  const unsigned int timeout_base = is_canonical ?
-    IDLE_OR_CONN_TIMEOUT_CANONICAL : IDLE_OR_CONN_TIMEOUT_NONCANONICAL;
-
-  if (bool_eq(is_canonical, or_conn->is_canonical) &&
-      or_conn->idle_timeout != 0) {
-    /* Don't recalculate an existing idle_timeout unless the canonical
-     * status changed. */
-    return;
-  }
-
-  or_conn->is_canonical = !! is_canonical; /* force to a 1-bit boolean */
-  or_conn->idle_timeout = timeout_base + crypto_rand_int(timeout_base / 2);
-}
-
 /** If we don't necessarily know the router we're connecting to, but we
  * have an addr/port/id_digest, then fill in as much as we can. Start
  * by checking to see if this describes a router we know.
@@ -889,7 +849,7 @@ connection_or_init_conn_from_address(or_connection_t *conn,
     /* XXXX proposal 186 is making this more complex.  For now, a conn
        is canonical when it uses the _preferred_ address. */
     if (tor_addr_eq(&conn->base_.addr, &node_ap.addr))
-      connection_or_set_canonical(conn, 1);
+      conn->is_canonical = 1;
     if (!started_here) {
       /* Override the addr/port, so our log messages will make sense.
        * This is dangerous, since if we ever try looking up a conn by
@@ -1117,7 +1077,7 @@ connection_or_connect_failed(or_connection_t *conn,
 {
   control_event_or_conn_status(conn, OR_CONN_EVENT_FAILED, reason);
   if (!authdir_mode_tests_reachability(get_options()))
-    control_event_bootstrap_problem(msg, reason, conn);
+    control_event_bootstrap_problem(msg, reason);
 }
 
 /** <b>conn</b> got an error in connection_handle_read_impl() or
@@ -1234,12 +1194,6 @@ connection_or_connect(const tor_addr_t *_addr, uint16_t port,
                "your pluggable transport proxy stopped running.",
                fmt_addrport(&TO_CONN(conn)->addr, TO_CONN(conn)->port),
                transport_name, transport_name);
-
-      control_event_bootstrap_problem(
-                                "Can't connect to bridge",
-                                END_OR_CONN_REASON_PT_MISSING,
-                                conn);
-
     } else {
       log_warn(LD_GENERAL, "Tried to connect to '%s' through a proxy, but "
                "the proxy address could not be found.",
@@ -1754,8 +1708,7 @@ connection_or_client_learned_peer_id(or_connection_t *conn,
     if (!authdir_mode_tests_reachability(options))
       control_event_bootstrap_problem(
                                 "Unexpected identity in router certificate",
-                                END_OR_CONN_REASON_OR_IDENTITY,
-                                conn);
+                                END_OR_CONN_REASON_OR_IDENTITY);
     return -1;
   }
   if (authdir_mode_tests_reachability(options)) {
@@ -1804,6 +1757,8 @@ connection_tls_finish_handshake(or_connection_t *conn)
             conn,
             safe_str_client(conn->base_.address),
             tor_tls_get_ciphersuite_name(conn->tls));
+
+  directory_set_dirty();
 
   if (connection_or_check_valid_tls_handshake(conn, started_here,
                                               digest_rcvd) < 0)
@@ -2005,6 +1960,9 @@ connection_or_write_cell_to_buf(const cell_t *cell, or_connection_t *conn)
 
   if (conn->base_.state == OR_CONN_STATE_OR_HANDSHAKING_V3)
     or_handshake_state_record_cell(conn, conn->handshake_state, cell, 0);
+
+  if (cell->command != CELL_PADDING)
+    conn->timestamp_last_added_nonpadding = approx_time();
 }
 
 /** Pack a variable-length <b>cell</b> into wire-format, and write it onto
@@ -2025,6 +1983,8 @@ connection_or_write_var_cell_to_buf(const var_cell_t *cell,
                           cell->payload_len, TO_CONN(conn));
   if (conn->base_.state == OR_CONN_STATE_OR_HANDSHAKING_V3)
     or_handshake_state_record_var_cell(conn, conn->handshake_state, cell, 0);
+  if (cell->command != CELL_PADDING)
+    conn->timestamp_last_added_nonpadding = approx_time();
 
   /* Touch the channel's active timestamp if there is one */
   if (conn->chan)

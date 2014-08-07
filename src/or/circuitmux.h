@@ -99,8 +99,7 @@ void circuitmux_assert_okay(circuitmux_t *cmux);
 
 /* Create/destroy */
 circuitmux_t * circuitmux_alloc(void);
-void circuitmux_detach_all_circuits(circuitmux_t *cmux,
-                                    smartlist_t *detached_out);
+void circuitmux_detach_all_circuits(circuitmux_t *cmux);
 void circuitmux_free(circuitmux_t *cmux);
 
 /* Policy control */
@@ -120,10 +119,6 @@ unsigned int circuitmux_num_cells_for_circuit(circuitmux_t *cmux,
 unsigned int circuitmux_num_cells(circuitmux_t *cmux);
 unsigned int circuitmux_num_circuits(circuitmux_t *cmux);
 unsigned int circuitmux_num_active_circuits(circuitmux_t *cmux);
-
-/* Debuging interface - slow. */
-int64_t circuitmux_count_queued_destroy_cells(const channel_t *chan,
-                                              const circuitmux_t *cmux);
 
 /* Channel interface */
 circuit_t * circuitmux_get_first_active_circuit(circuitmux_t *cmux,

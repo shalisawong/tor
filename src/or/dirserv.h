@@ -59,15 +59,20 @@ int directory_fetches_dir_info_later(const or_options_t *options);
 int directory_caches_unknown_auth_certs(const or_options_t *options);
 int directory_caches_dir_info(const or_options_t *options);
 int directory_permits_begindir_requests(const or_options_t *options);
+int directory_permits_controller_requests(const or_options_t *options);
 int directory_too_idle_to_fetch_descriptors(const or_options_t *options,
                                             time_t now);
 
+void directory_set_dirty(void);
+cached_dir_t *dirserv_get_directory(void);
+cached_dir_t *dirserv_get_runningrouters(void);
 cached_dir_t *dirserv_get_consensus(const char *flavor_name);
 void dirserv_set_cached_consensus_networkstatus(const char *consensus,
                                                 const char *flavor_name,
                                                 const digests_t *digests,
                                                 time_t published);
 void dirserv_clear_old_networkstatuses(time_t cutoff);
+void dirserv_clear_old_v1_info(time_t now);
 int dirserv_get_routerdesc_fingerprints(smartlist_t *fps_out, const char *key,
                                         const char **msg,
                                         int for_unencrypted_conn,

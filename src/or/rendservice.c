@@ -82,7 +82,7 @@ typedef struct rend_service_port_config_t {
 #define MAX_INTRO_CIRCS_PER_PERIOD 10
 /** How many times will a hidden service operator attempt to connect to
  * a requested rendezvous point before giving up? */
-#define MAX_REND_FAILURES 8
+#define MAX_REND_FAILURES 30
 /** How many seconds should we spend trying to connect to a requested
  * rendezvous point before giving up? */
 #define MAX_REND_TIMEOUT 30
@@ -654,35 +654,6 @@ rend_service_load_all_keys(void)
   } SMARTLIST_FOREACH_END(s);
 
   return 0;
-}
-
-/** Add to <b>lst</b> every filename used by <b>s</b>. */
-static void
-rend_service_add_filenames_to_list(smartlist_t *lst, const rend_service_t *s)
-{
-  tor_assert(lst);
-  tor_assert(s);
-  smartlist_add_asprintf(lst, "%s"PATH_SEPARATOR"private_key",
-                         s->directory);
-  smartlist_add_asprintf(lst, "%s"PATH_SEPARATOR"hostname",
-                         s->directory);
-  smartlist_add_asprintf(lst, "%s"PATH_SEPARATOR"client_keys",
-                         s->directory);
-}
-
-/** Add to <b>open_lst</b> every filename used by a configured hidden service,
- * and to <b>stat_lst</b> every directory used by a configured hidden
- * service */
-void
-rend_services_add_filenames_to_lists(smartlist_t *open_lst,
-                                     smartlist_t *stat_lst)
-{
-  if (!rend_service_list)
-    return;
-  SMARTLIST_FOREACH_BEGIN(rend_service_list, rend_service_t *, s) {
-    rend_service_add_filenames_to_list(open_lst, s);
-    smartlist_add(stat_lst, tor_strdup(s->directory));
-  } SMARTLIST_FOREACH_END(s);
 }
 
 /** Load and/or generate private keys for the hidden service <b>s</b>,
@@ -1532,6 +1503,27 @@ find_rp_for_intro(const rend_intro_cell_t *intro,
   return rp;
 }
 
+/** Remove unnecessary parts from a rend_intro_cell_t - the ciphertext if
+ * already decrypted, the plaintext too if already parsed
+ */
+
+void
+rend_service_compact_intro(rend_intro_cell_t *request)
+{
+  if (!request) return;
+
+  if ((request->plaintext && request->plaintext_len > 0) ||
+       request->parsed) {
+    tor_free(request->ciphertext);
+    request->ciphertext_len = 0;
+  }
+
+  if (request->parsed) {
+    tor_free(request->plaintext);
+    request->plaintext_len = 0;
+  }
+}
+
 /** Free a parsed INTRODUCE1 or INTRODUCE2 cell that was allocated by
  * rend_service_parse_intro().
  */
@@ -2070,7 +2062,7 @@ rend_service_decrypt_intro(
   if (err_msg_out && !err_msg) {
     tor_asprintf(&err_msg,
                  "unknown INTRODUCE%d error decrypting encrypted part",
-                 intro ? (int)(intro->type) : -1);
+                 (int)(intro->type));
   }
   if (status >= 0) status = -1;
 
@@ -2176,7 +2168,7 @@ rend_service_parse_intro_plaintext(
   if (err_msg_out && !err_msg) {
     tor_asprintf(&err_msg,
                  "unknown INTRODUCE%d error parsing encrypted part",
-                 intro ? (int)(intro->type) : -1);
+                 (int)(intro->type));
   }
   if (status >= 0) status = -1;
 

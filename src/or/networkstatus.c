@@ -10,7 +10,6 @@
  * client or cache.
  */
 
-#define NETWORKSTATUS_PRIVATE
 #include "or.h"
 #include "channel.h"
 #include "circuitmux.h"
@@ -32,7 +31,6 @@
 #include "router.h"
 #include "routerlist.h"
 #include "routerparse.h"
-#include "transports.h"
 
 /** Map from lowercase nickname to identity digest of named server, if any. */
 static strmap_t *named_server_map = NULL;
@@ -184,7 +182,7 @@ router_reload_consensus_networkstatus(void)
 }
 
 /** Free all storage held by the vote_routerstatus object <b>rs</b>. */
-STATIC void
+static void
 vote_routerstatus_free(vote_routerstatus_t *rs)
 {
   vote_microdesc_hash_t *h, *next;
@@ -322,17 +320,6 @@ networkstatus_check_document_signature(const networkstatus_t *consensus,
       tor_memneq(sig->identity_digest, cert->cache_info.identity_digest,
                  DIGEST_LEN))
     return -1;
-
-  if (authority_cert_is_blacklisted(cert)) {
-    /* We implement blacklisting for authority signing keys by treating
-     * all their signatures as always bad. That way we don't get into
-     * crazy loops of dropping and re-fetching signatures. */
-    log_warn(LD_DIR, "Ignoring a consensus signature made with deprecated"
-             " signing key %s",
-             hex_str(cert->signing_key_digest, DIGEST_LEN));
-    sig->bad_signature = 1;
-    return 0;
-  }
 
   signed_digest_len = crypto_pk_keysize(cert->signing_key);
   signed_digest = tor_malloc(signed_digest_len);
@@ -533,6 +520,16 @@ networkstatus_check_consensus_signature(networkstatus_t *consensus,
     return -1;
   else
     return -2;
+}
+
+/** Helper: return a newly allocated string containing the name of the filename
+ * where we plan to cache the network status with the given identity digest. */
+char *
+networkstatus_get_cache_filename(const char *identity_digest)
+{
+  char fp[HEX_DIGEST_LEN+1];
+  base16_encode(fp, HEX_DIGEST_LEN+1, identity_digest, DIGEST_LEN);
+  return get_datadir_fname2("cached-status", fp);
 }
 
 /** How far in the future do we allow a network-status to get before removing
@@ -830,7 +827,7 @@ update_consensus_networkstatus_fetch_time_impl(time_t now, int flav)
     if (directory_fetches_dir_info_early(options)) {
       /* We want to cache the next one at some point after this one
        * is no longer fresh... */
-      start = (time_t)(c->fresh_until + min_sec_before_caching);
+      start = c->fresh_until + min_sec_before_caching;
       /* Some clients may need the consensus sooner than others. */
       if (options->FetchDirInfoExtraEarly || authdir_mode_v3(options)) {
         dl_interval = 60;
@@ -843,7 +840,7 @@ update_consensus_networkstatus_fetch_time_impl(time_t now, int flav)
     } else {
       /* We're an ordinary client or a bridge. Give all the caches enough
        * time to download the consensus. */
-      start = (time_t)(c->fresh_until + (interval*3)/4);
+      start = c->fresh_until + (interval*3)/4;
       /* But download the next one well before this one is expired. */
       dl_interval = ((c->valid_until - start) * 7 )/ 8;
 
@@ -851,7 +848,7 @@ update_consensus_networkstatus_fetch_time_impl(time_t now, int flav)
        * to choose the rest of the interval *after* them. */
       if (directory_fetches_dir_info_later(options)) {
         /* Give all the *clients* enough time to download the consensus. */
-        start = (time_t)(start + dl_interval + min_sec_before_caching);
+        start = start + dl_interval + min_sec_before_caching;
         /* But try to get it before ours actually expires. */
         dl_interval = (c->valid_until - start) - min_sec_before_caching;
       }
@@ -897,45 +894,14 @@ update_consensus_networkstatus_fetch_time(time_t now)
 
 /** Return 1 if there's a reason we shouldn't try any directory
  * fetches yet (e.g. we demand bridges and none are yet known).
- * Else return 0.
-
- * If we return 1 and <b>msg_out</b> is provided, set <b>msg_out</b>
- * to an explanation of why directory fetches are delayed. (If we
- * return 0, we set msg_out to NULL.)
- */
+ * Else return 0. */
 int
-should_delay_dir_fetches(const or_options_t *options, const char **msg_out)
+should_delay_dir_fetches(const or_options_t *options)
 {
-  if (msg_out) {
-    *msg_out = NULL;
-  }
-
-  if (options->DisableNetwork) {
-    if (msg_out) {
-      *msg_out = "DisableNetwork is set.";
-    }
-    log_info(LD_DIR, "Delaying dir fetches (DisableNetwork is set)");
+  if (options->UseBridges && !any_bridge_descriptors_known()) {
+    log_info(LD_DIR, "delaying dir fetches (no running bridges known)");
     return 1;
   }
-
-  if (options->UseBridges) {
-    if (!any_bridge_descriptors_known()) {
-      if (msg_out) {
-        *msg_out = "No running bridges";
-      }
-      log_info(LD_DIR, "Delaying dir fetches (no running bridges known)");
-      return 1;
-    }
-
-    if (pt_proxies_configuration_pending()) {
-      if (msg_out) {
-        *msg_out = "Pluggable transport proxies still configuring";
-      }
-      log_info(LD_DIR, "Delaying dir fetches (pt proxies still configuring)");
-      return 1;
-    }
-  }
-
   return 0;
 }
 
@@ -945,7 +911,7 @@ void
 update_networkstatus_downloads(time_t now)
 {
   const or_options_t *options = get_options();
-  if (should_delay_dir_fetches(options, NULL))
+  if (should_delay_dir_fetches(options))
     return;
   update_consensus_networkstatus_downloads(now);
   update_certificate_downloads(now);
@@ -1274,11 +1240,7 @@ networkstatus_set_current_consensus(const char *consensus,
         /* Even if we had enough signatures, we'd never use this as the
          * latest consensus. */
         if (was_waiting_for_certs && from_cache)
-          if (unlink(unverified_fname) != 0) {
-            log_warn(LD_FS,
-                     "Failed to unlink %s: %s",
-                     unverified_fname, strerror(errno));
-          }
+          unlink(unverified_fname);
       }
       goto done;
     } else {
@@ -1288,13 +1250,8 @@ networkstatus_set_current_consensus(const char *consensus,
                  "consensus");
         result = -2;
       }
-      if (was_waiting_for_certs && (r < -1) && from_cache) {
-        if (unlink(unverified_fname) != 0) {
-            log_warn(LD_FS,
-                     "Failed to unlink %s: %s",
-                     unverified_fname, strerror(errno));
-        }
-      }
+      if (was_waiting_for_certs && (r < -1) && from_cache)
+        unlink(unverified_fname);
       goto done;
     }
   }
@@ -1342,11 +1299,7 @@ networkstatus_set_current_consensus(const char *consensus,
       waiting->body = NULL;
     waiting->set_at = 0;
     waiting->dl_failed = 0;
-    if (unlink(unverified_fname) != 0) {
-      log_warn(LD_FS,
-               "Failed to unlink %s: %s",
-               unverified_fname, strerror(errno));
-    }
+    unlink(unverified_fname);
   }
 
   /* Reset the failure count only if this consensus is actually valid. */

@@ -572,7 +572,7 @@ dump_desc(const char *desc, const char *type)
     char *content = tor_malloc_zero(filelen);
     tor_snprintf(content, filelen, "Unable to parse descriptor of type "
                  "%s:\n%s", type, desc);
-    write_str_to_file(debugfile, content, 1);
+    write_str_to_file(debugfile, content, 0);
     log_info(LD_DIR, "Unable to parse descriptor of type %s. See file "
              "unparseable-desc in data directory for details.", type);
     tor_free(content);
@@ -600,6 +600,17 @@ router_get_router_hash(const char *s, size_t s_len, char *digest)
 {
   return router_get_hash_impl(s, s_len, digest,
                               "router ","\nrouter-signature", '\n',
+                              DIGEST_SHA1);
+}
+
+/** Set <b>digest</b> to the SHA-1 digest of the hash of the running-routers
+ * string in <b>s</b>. Return 0 on success, -1 on failure.
+ */
+int
+router_get_runningrouters_hash(const char *s, char *digest)
+{
+  return router_get_hash_impl(s, strlen(s), digest,
+                              "network-status","\ndirectory-signature", '\n',
                               DIGEST_SHA1);
 }
 
@@ -680,7 +691,7 @@ router_get_dirobj_signature(const char *digest,
 
 /** Helper: used to generate signatures for routers, directories and
  * network-status objects.  Given a digest in <b>digest</b> and a secret
- * <b>private_key</b>, generate a PKCS1-padded signature, BASE64-encode it,
+ * <b>private_key</b>, generate an PKCS1-padded signature, BASE64-encode it,
  * surround it with -----BEGIN/END----- pairs, and write it to the
  * <b>buf_len</b>-byte buffer at <b>buf</b>.  Return 0 on success, -1 on
  * failure.
@@ -703,7 +714,6 @@ router_append_dirobj_signature(char *buf, size_t buf_len, const char *digest,
     return -1;
   }
   memcpy(buf+s_len, sig, sig_len+1);
-  tor_free(sig);
   return 0;
 }
 
@@ -1185,7 +1195,8 @@ router_parse_entry_from_string(const char *s, const char *end,
     log_warn(LD_DIR,"Router nickname is invalid");
     goto err;
   }
-  if (!tor_inet_aton(tok->args[1], &in)) {
+  router->address = tor_strdup(tok->args[1]);
+  if (!tor_inet_aton(router->address, &in)) {
     log_warn(LD_DIR,"Router address is not an IP address.");
     goto err;
   }
@@ -2029,6 +2040,14 @@ routerstatus_parse_entry_from_string(memarea_t *area,
   return rs;
 }
 
+/** Helper to sort a smartlist of pointers to routerstatus_t */
+int
+compare_routerstatus_entries(const void **_a, const void **_b)
+{
+  const routerstatus_t *a = *_a, *b = *_b;
+  return fast_memcmp(a->identity_digest, b->identity_digest, DIGEST_LEN);
+}
+
 int
 compare_vote_routerstatus_entries(const void **_a, const void **_b)
 {
@@ -2686,14 +2705,6 @@ networkstatus_parse_vote_from_string(const char *s, const char **eos_out,
                  voter->identity_digest, DIGEST_LEN)) {
         log_warn(LD_DIR,"Mismatch between identities in certificate and vote");
         goto err;
-      }
-      if (ns->type != NS_TYPE_CONSENSUS) {
-        if (authority_cert_is_blacklisted(ns->cert)) {
-          log_warn(LD_DIR, "Rejecting vote signature made with blacklisted "
-                   "signing key %s",
-                   hex_str(ns->cert->signing_key_digest, DIGEST_LEN));
-          goto err;
-        }
       }
       voter->address = tor_strdup(tok->args[2]);
       if (!tor_inet_aton(tok->args[3], &in)) {
@@ -4129,13 +4140,11 @@ microdescs_parse_from_string(const char *s, const char *eos,
     microdesc_free(md);
     md = NULL;
 
-    SMARTLIST_FOREACH(tokens, directory_token_t *, t, token_clear(t));
     memarea_clear(area);
     smartlist_clear(tokens);
     s = start_of_next_microdesc;
   }
 
-  SMARTLIST_FOREACH(tokens, directory_token_t *, t, token_clear(t));
   memarea_drop_all(area);
   smartlist_free(tokens);
 

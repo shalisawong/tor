@@ -684,63 +684,6 @@ router_initialize_tls_context(void)
                               (unsigned int)lifetime);
 }
 
-/** Compute fingerprint (or hashed fingerprint if hashed is 1) and write
- * it to 'fingerprint' (or 'hashed-fingerprint'). Return 0 on success, or
- * -1 if Tor should die,
- */
-STATIC int
-router_write_fingerprint(int hashed)
-{
-  char *keydir = NULL, *cp = NULL;
-  const char *fname = hashed ? "hashed-fingerprint" :
-                               "fingerprint";
-  char fingerprint[FINGERPRINT_LEN+1];
-  const or_options_t *options = get_options();
-  char *fingerprint_line = NULL;
-  int result = -1;
-
-  keydir = get_datadir_fname(fname);
-  log_info(LD_GENERAL,"Dumping %sfingerprint to \"%s\"...",
-           hashed ? "hashed " : "", keydir);
-  if (!hashed) {
-    if (crypto_pk_get_fingerprint(get_server_identity_key(),
-                                  fingerprint, 0) < 0) {
-      log_err(LD_GENERAL,"Error computing fingerprint");
-      goto done;
-    }
-  } else {
-    if (crypto_pk_get_hashed_fingerprint(get_server_identity_key(),
-                                         fingerprint) < 0) {
-      log_err(LD_GENERAL,"Error computing hashed fingerprint");
-      goto done;
-    }
-  }
-
-  tor_asprintf(&fingerprint_line, "%s %s\n", options->Nickname, fingerprint);
-
-  /* Check whether we need to write the (hashed-)fingerprint file. */
-
-  cp = read_file_to_str(keydir, RFTS_IGNORE_MISSING, NULL);
-  if (!cp || strcmp(cp, fingerprint_line)) {
-    if (write_str_to_file(keydir, fingerprint_line, 0)) {
-      log_err(LD_FS, "Error writing %sfingerprint line to file",
-              hashed ? "hashed " : "");
-      goto done;
-    }
-  }
-
-  log_notice(LD_GENERAL, "Your Tor %s identity key fingerprint is '%s %s'",
-             hashed ? "bridge's hashed" : "server's", options->Nickname,
-             fingerprint);
-
-  result = 0;
- done:
-  tor_free(cp);
-  tor_free(keydir);
-  tor_free(fingerprint_line);
-  return result;
-}
-
 /** Initialize all OR private keys, and the TLS context, as necessary.
  * On OPs, this only initializes the tls context. Return 0 on success,
  * or -1 if Tor should die.
@@ -749,10 +692,14 @@ int
 init_keys(void)
 {
   char *keydir;
+  char fingerprint[FINGERPRINT_LEN+1];
+  /*nickname<space>fp\n\0 */
+  char fingerprint_line[MAX_NICKNAME_LEN+FINGERPRINT_LEN+3];
   const char *mydesc;
   crypto_pk_t *prkey;
   char digest[DIGEST_LEN];
   char v3_digest[DIGEST_LEN];
+  char *cp;
   const or_options_t *options = get_options();
   dirinfo_type_t type;
   time_t now = time(NULL);
@@ -942,16 +889,40 @@ init_keys(void)
     }
   }
 
-  /* 5. Dump fingerprint and possibly hashed fingerprint to files. */
-  if (router_write_fingerprint(0)) {
-    log_err(LD_FS, "Error writing fingerprint to file");
+  /* 5. Dump fingerprint to 'fingerprint' */
+  keydir = get_datadir_fname("fingerprint");
+  log_info(LD_GENERAL,"Dumping fingerprint to \"%s\"...",keydir);
+  if (crypto_pk_get_fingerprint(get_server_identity_key(),
+                                fingerprint, 0) < 0) {
+    log_err(LD_GENERAL,"Error computing fingerprint");
+    tor_free(keydir);
     return -1;
   }
-  if (!public_server_mode(options) && router_write_fingerprint(1)) {
-    log_err(LD_FS, "Error writing hashed fingerprint to file");
+  tor_assert(strlen(options->Nickname) <= MAX_NICKNAME_LEN);
+  if (tor_snprintf(fingerprint_line, sizeof(fingerprint_line),
+                   "%s %s\n",options->Nickname, fingerprint) < 0) {
+    log_err(LD_GENERAL,"Error writing fingerprint line");
+    tor_free(keydir);
     return -1;
   }
+  /* Check whether we need to write the fingerprint file. */
+  cp = NULL;
+  if (file_status(keydir) == FN_FILE)
+    cp = read_file_to_str(keydir, 0, NULL);
+  if (!cp || strcmp(cp, fingerprint_line)) {
+    if (write_str_to_file(keydir, fingerprint_line, 0)) {
+      log_err(LD_FS, "Error writing fingerprint line to file");
+      tor_free(keydir);
+      tor_free(cp);
+      return -1;
+    }
+  }
+  tor_free(cp);
+  tor_free(keydir);
 
+  log_notice(LD_GENERAL,
+      "Your Tor server's identity key fingerprint is '%s %s'",
+      options->Nickname, fingerprint);
   if (!authdir_mode(options))
     return 0;
   /* 6. [authdirserver only] load approved-routers file */
@@ -961,7 +932,8 @@ init_keys(void)
   }
   /* 6b. [authdirserver only] add own key to approved directories. */
   crypto_pk_get_digest(get_server_identity_key(), digest);
-  type = ((options->V3AuthoritativeDir ?
+  type = ((options->V1AuthoritativeDir ? V1_DIRINFO : NO_DIRINFO) |
+          (options->V3AuthoritativeDir ?
                (V3_DIRINFO|MICRODESC_DIRINFO|EXTRAINFO_DIRINFO) : NO_DIRINFO) |
           (options->BridgeAuthoritativeDir ? BRIDGE_DIRINFO : NO_DIRINFO));
 
@@ -1176,7 +1148,7 @@ consider_testing_reachability(int test_or, int test_dir)
     /* XXX IPv6 self testing */
     log_info(LD_CIRC, "Testing %s of my ORPort: %s:%d.",
              !orport_reachable ? "reachability" : "bandwidth",
-             fmt_addr32(me->addr), me->or_port);
+             me->address, me->or_port);
     circuit_launch_by_extend_info(CIRCUIT_PURPOSE_TESTING, ei,
                             CIRCLAUNCH_NEED_CAPACITY|CIRCLAUNCH_IS_INTERNAL);
     extend_info_free(ei);
@@ -1188,7 +1160,7 @@ consider_testing_reachability(int test_or, int test_dir)
                 CONN_TYPE_DIR, &addr, me->dir_port,
                 DIR_PURPOSE_FETCH_SERVERDESC)) {
     /* ask myself, via tor, for my server descriptor. */
-    directory_initiate_command(&addr,
+    directory_initiate_command(me->address, &addr,
                                me->or_port, me->dir_port,
                                me->cache_info.identity_digest,
                                DIR_PURPOSE_FETCH_SERVERDESC,
@@ -1203,7 +1175,6 @@ router_orport_found_reachable(void)
 {
   const routerinfo_t *me = router_get_my_routerinfo();
   if (!can_reach_or_port && me) {
-    char *address = tor_dup_ip(me->addr);
     log_notice(LD_OR,"Self-testing indicates your ORPort is reachable from "
                "the outside. Excellent.%s",
                get_options()->PublishServerDescriptor_ != NO_DIRINFO ?
@@ -1212,8 +1183,7 @@ router_orport_found_reachable(void)
     mark_my_descriptor_dirty("ORPort found reachable");
     control_event_server_status(LOG_NOTICE,
                                 "REACHABILITY_SUCCEEDED ORADDRESS=%s:%d",
-                                address, me->or_port);
-    tor_free(address);
+                                me->address, me->or_port);
   }
 }
 
@@ -1223,7 +1193,6 @@ router_dirport_found_reachable(void)
 {
   const routerinfo_t *me = router_get_my_routerinfo();
   if (!can_reach_dir_port && me) {
-    char *address = tor_dup_ip(me->addr);
     log_notice(LD_DIRSERV,"Self-testing indicates your DirPort is reachable "
                "from the outside. Excellent.");
     can_reach_dir_port = 1;
@@ -1231,8 +1200,7 @@ router_dirport_found_reachable(void)
       mark_my_descriptor_dirty("DirPort found reachable");
     control_event_server_status(LOG_NOTICE,
                                 "REACHABILITY_SUCCEEDED DIRADDRESS=%s:%d",
-                                address, me->dir_port);
-    tor_free(address);
+                                me->address, me->dir_port);
   }
 }
 
@@ -1267,8 +1235,7 @@ router_perform_bandwidth_test(int num_circs, time_t now)
 }
 
 /** Return true iff our network is in some sense disabled: either we're
- * hibernating, entering hibernation, or the network is turned off with
- * DisableNetwork. */
+ * hibernating, entering hibernation, or */
 int
 net_is_disabled(void)
 {
@@ -1283,6 +1250,14 @@ authdir_mode(const or_options_t *options)
 {
   return options->AuthoritativeDir != 0;
 }
+/** Return true iff we believe ourselves to be a v1 authoritative
+ * directory server.
+ */
+int
+authdir_mode_v1(const or_options_t *options)
+{
+  return authdir_mode(options) && options->V1AuthoritativeDir != 0;
+}
 /** Return true iff we believe ourselves to be a v3 authoritative
  * directory server.
  */
@@ -1291,11 +1266,12 @@ authdir_mode_v3(const or_options_t *options)
 {
   return authdir_mode(options) && options->V3AuthoritativeDir != 0;
 }
-/** Return true iff we are a v3 directory authority. */
+/** Return true iff we are a v1 or v3 directory authority. */
 int
 authdir_mode_any_main(const or_options_t *options)
 {
-  return options->V3AuthoritativeDir;
+  return options->V1AuthoritativeDir ||
+         options->V3AuthoritativeDir;
 }
 /** Return true if we believe ourselves to be any kind of
  * authoritative directory beyond just a hidserv authority. */
@@ -1349,8 +1325,8 @@ authdir_mode_bridge(const or_options_t *options)
 
 /** Return true iff we are trying to be a server.
  */
-MOCK_IMPL(int,
-server_mode,(const or_options_t *options))
+int
+server_mode(const or_options_t *options)
 {
   if (options->ClientOnly) return 0;
   /* XXXX024 I believe we can kill off ORListenAddress here.*/
@@ -1359,8 +1335,8 @@ server_mode,(const or_options_t *options))
 
 /** Return true iff we are trying to be a non-bridge server.
  */
-MOCK_IMPL(int,
-public_server_mode,(const or_options_t *options))
+int
+public_server_mode(const or_options_t *options)
 {
   if (!server_mode(options)) return 0;
   return (!options->BridgeRelay);
@@ -1688,10 +1664,22 @@ router_is_me(const routerinfo_t *router)
   return router_digest_is_me(router->cache_info.identity_digest);
 }
 
+/** Return true iff <b>fp</b> is a hex fingerprint of my identity digest. */
+int
+router_fingerprint_is_me(const char *fp)
+{
+  char digest[DIGEST_LEN];
+  if (strlen(fp) == HEX_DIGEST_LEN &&
+      base16_decode(digest, sizeof(digest), fp, HEX_DIGEST_LEN) == 0)
+    return router_digest_is_me(digest);
+
+  return 0;
+}
+
 /** Return a routerinfo for this OR, rebuilding a fresh one if
  * necessary.  Return NULL on error, or if called on an OP. */
-MOCK_IMPL(const routerinfo_t *,
-router_get_my_routerinfo,(void))
+const routerinfo_t *
+router_get_my_routerinfo(void)
 {
   if (!server_mode(get_options()))
     return NULL;
@@ -1795,6 +1783,7 @@ router_rebuild_descriptor(int force)
 
   ri = tor_malloc_zero(sizeof(routerinfo_t));
   ri->cache_info.routerlist_index = -1;
+  ri->address = tor_dup_ip(addr);
   ri->nickname = tor_strdup(options->Nickname);
   ri->addr = addr;
   ri->or_port = router_get_advertised_or_port(options);
@@ -1859,7 +1848,7 @@ router_rebuild_descriptor(int force)
     policies_parse_exit_policy(options->ExitPolicy, &ri->exit_policy,
                                options->IPv6Exit,
                                options->ExitPolicyRejectPrivate,
-                               ri->addr, !options->BridgeRelay);
+                               ri->address, !options->BridgeRelay);
   }
   ri->policy_is_reject_star =
     policy_is_reject_star(ri->exit_policy, AF_INET) &&
@@ -1871,6 +1860,12 @@ router_rebuild_descriptor(int force)
       ri->ipv6_exit_policy = parse_short_policy(p_tmp);
     tor_free(p_tmp);
   }
+
+#if 0
+  /* XXXX NM NM I belive this is safe to remove */
+  if (authdir_mode(options))
+    ri->is_valid = ri->is_named = 1; /* believe in yourself */
+#endif
 
   if (options->MyFamily && ! options->BridgeRelay) {
     smartlist_t *family;
@@ -2265,7 +2260,8 @@ char *
 router_dump_router_to_string(routerinfo_t *router,
                              crypto_pk_t *ident_key)
 {
-  char *address = NULL;
+  /* XXXX025 Make this look entirely at its arguments, and not at globals.
+   */
   char *onion_pkey = NULL; /* Onion key, PEM-encoded. */
   char *identity_pkey = NULL; /* Identity key, PEM-encoded. */
   char digest[DIGEST_LEN];
@@ -2339,9 +2335,7 @@ router_dump_router_to_string(routerinfo_t *router,
     }
   }
 
-  address = tor_dup_ip(router->addr);
   chunks = smartlist_new();
-
   /* Generate the easy portion of the router descriptor. */
   smartlist_add_asprintf(chunks,
                     "router %s %s %d 0 %d\n"
@@ -2357,7 +2351,7 @@ router_dump_router_to_string(routerinfo_t *router,
                     "signing-key\n%s"
                     "%s%s%s%s",
     router->nickname,
-    address,
+    router->address,
     router->or_port,
     decide_to_advertise_dirport(options, router->dir_port),
     extra_or_address ? extra_or_address : "",
@@ -2371,8 +2365,7 @@ router_dump_router_to_string(routerinfo_t *router,
     has_extra_info_digest ? "extra-info-digest " : "",
     has_extra_info_digest ? extra_info_digest : "",
     has_extra_info_digest ? "\n" : "",
-    (options->DownloadExtraInfo || options->V3AuthoritativeDir) ?
-                         "caches-extra-info\n" : "",
+    options->DownloadExtraInfo ? "caches-extra-info\n" : "",
     onion_pkey, identity_pkey,
     family_line,
     we_are_hibernating() ? "hibernating 1\n" : "",
@@ -2400,13 +2393,20 @@ router_dump_router_to_string(routerinfo_t *router,
   if (!router->exit_policy || !smartlist_len(router->exit_policy)) {
     smartlist_add(chunks, tor_strdup("reject *:*\n"));
   } else if (router->exit_policy) {
-    char *exit_policy = router_dump_exit_policy_to_string(router,1,0);
-
-    if (!exit_policy)
-      goto err;
-
-    smartlist_add_asprintf(chunks, "%s\n", exit_policy);
-    tor_free(exit_policy);
+    int i;
+    for (i = 0; i < smartlist_len(router->exit_policy); ++i) {
+      char pbuf[POLICY_BUF_LEN];
+      addr_policy_t *tmpe = smartlist_get(router->exit_policy, i);
+      int result;
+      if (tor_addr_family(&tmpe->addr) == AF_INET6)
+        continue; /* Don't include IPv6 parts of address policy */
+      result = policy_write_item(pbuf, POLICY_BUF_LEN, tmpe, 1);
+      if (result < 0) {
+        log_warn(LD_BUG,"descriptor policy_write_item ran out of room!");
+        goto err;
+      }
+      smartlist_add_asprintf(chunks, "%s\n", pbuf);
+    }
   }
 
   if (router->ipv6_exit_policy) {
@@ -2465,63 +2465,12 @@ router_dump_router_to_string(routerinfo_t *router,
     SMARTLIST_FOREACH(chunks, char *, cp, tor_free(cp));
     smartlist_free(chunks);
   }
-  tor_free(address);
   tor_free(family_line);
   tor_free(onion_pkey);
   tor_free(identity_pkey);
   tor_free(extra_or_address);
 
   return output;
-}
-
-/**
- * OR only: Given <b>router</b>, produce a string with its exit policy.
- * If <b>include_ipv4</b> is true, include IPv4 entries.
- * If <b>include_ipv6</b> is true, include IPv6 entries.
- */
-char *
-router_dump_exit_policy_to_string(const routerinfo_t *router,
-                                  int include_ipv4,
-                                  int include_ipv6)
-{
-  smartlist_t *exit_policy_strings;
-  char *policy_string = NULL;
-
-  if ((!router->exit_policy) || (router->policy_is_reject_star)) {
-    return tor_strdup("reject *:*");
-  }
-
-  exit_policy_strings = smartlist_new();
-
-  SMARTLIST_FOREACH_BEGIN(router->exit_policy, addr_policy_t *, tmpe) {
-    char *pbuf;
-    int bytes_written_to_pbuf;
-    if ((tor_addr_family(&tmpe->addr) == AF_INET6) && (!include_ipv6)) {
-      continue; /* Don't include IPv6 parts of address policy */
-    }
-    if ((tor_addr_family(&tmpe->addr) == AF_INET) && (!include_ipv4)) {
-      continue; /* Don't include IPv4 parts of address policy */
-    }
-
-    pbuf = tor_malloc(POLICY_BUF_LEN);
-    bytes_written_to_pbuf = policy_write_item(pbuf,POLICY_BUF_LEN, tmpe, 1);
-
-    if (bytes_written_to_pbuf < 0) {
-      log_warn(LD_BUG, "router_dump_exit_policy_to_string ran out of room!");
-      tor_free(pbuf);
-      goto done;
-    }
-
-    smartlist_add(exit_policy_strings,pbuf);
-  } SMARTLIST_FOREACH_END(tmpe);
-
-  policy_string = smartlist_join_strings(exit_policy_strings, "\n", 0, NULL);
-
- done:
-  SMARTLIST_FOREACH(exit_policy_strings, char *, str, tor_free(str));
-  smartlist_free(exit_policy_strings);
-
-  return policy_string;
 }
 
 /** Copy the primary (IPv4) OR port (IP address and TCP port) for

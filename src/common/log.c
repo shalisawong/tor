@@ -147,6 +147,9 @@ static INLINE char *format_msg(char *buf, size_t buf_len,
            const char *suffix,
            const char *format, va_list ap, size_t *msg_len_out)
   CHECK_PRINTF(7,0);
+static void logv(int severity, log_domain_mask_t domain, const char *funcname,
+                 const char *suffix, const char *format, va_list ap)
+  CHECK_PRINTF(5,0);
 
 /** Name of the application: used to generate the message we write at the
  * start of each new log. */
@@ -333,9 +336,9 @@ format_msg(char *buf, size_t buf_len,
  * <b>severity</b>.  If provided, <b>funcname</b> is prepended to the
  * message.  The actual message is derived as from tor_snprintf(format,ap).
  */
-MOCK_IMPL(STATIC void,
-logv,(int severity, log_domain_mask_t domain, const char *funcname,
-     const char *suffix, const char *format, va_list ap))
+static void
+logv(int severity, log_domain_mask_t domain, const char *funcname,
+     const char *suffix, const char *format, va_list ap)
 {
   char buf[10024];
   size_t msg_len = 0;
@@ -557,27 +560,6 @@ tor_log_update_sigsafe_err_fds(void)
     /* Don't use a virtual stderr when we're also logging to stdout. */
     assert(n_sigsafe_log_fds >= 2); /* Don't use assert inside log functions*/
     sigsafe_log_fds[0] = sigsafe_log_fds[--n_sigsafe_log_fds];
-  }
-
-  UNLOCK_LOGS();
-}
-
-/** Add to <b>out</b> a copy of every currently configured log file name. Used
- * to enable access to these filenames with the sandbox code. */
-void
-tor_log_get_logfile_names(smartlist_t *out)
-{
-  logfile_t *lf;
-  tor_assert(out);
-
-  LOCK_LOGS();
-
-  for (lf = logfiles; lf; lf = lf->next) {
-    if (lf->is_temporary || lf->is_syslog || lf->callback)
-      continue;
-    if (lf->filename == NULL)
-      continue;
-    smartlist_add(out, tor_strdup(lf->filename));
   }
 
   UNLOCK_LOGS();
@@ -1094,7 +1076,7 @@ log_level_to_string(int level)
 static const char *domain_list[] = {
   "GENERAL", "CRYPTO", "NET", "CONFIG", "FS", "PROTOCOL", "MM",
   "HTTP", "APP", "CONTROL", "CIRC", "REND", "BUG", "DIR", "DIRSERV",
-  "OR", "EDGE", "ACCT", "HIST", "HANDSHAKE", "HEARTBEAT", "CHANNEL", NULL
+  "OR", "EDGE", "ACCT", "HIST", "HANDSHAKE", "HEARTBEAT", "CHANNEL", "CLIENTLOGGING", NULL
 };
 
 /** Return a bitmask for the log domain for which <b>domain</b> is the name,
@@ -1296,4 +1278,39 @@ switch_logs_debug(void)
   log_global_min_severity_ = get_min_log_level();
   UNLOCK_LOGS();
 }
+
+#if 0
+static void
+dump_log_info(logfile_t *lf)
+{
+  const char *tp;
+
+  if (lf->filename) {
+    printf("=== log into \"%s\" (%s-%s) (%stemporary)\n", lf->filename,
+           sev_to_string(lf->min_loglevel),
+           sev_to_string(lf->max_loglevel),
+           lf->is_temporary?"":"not ");
+  } else if (lf->is_syslog) {
+    printf("=== syslog (%s-%s) (%stemporary)\n",
+           sev_to_string(lf->min_loglevel),
+           sev_to_string(lf->max_loglevel),
+           lf->is_temporary?"":"not ");
+  } else {
+    printf("=== log (%s-%s) (%stemporary)\n",
+           sev_to_string(lf->min_loglevel),
+           sev_to_string(lf->max_loglevel),
+           lf->is_temporary?"":"not ");
+  }
+}
+
+void
+describe_logs(void)
+{
+  logfile_t *lf;
+  printf("==== BEGIN LOGS ====\n");
+  for (lf = logfiles; lf; lf = lf->next)
+    dump_log_info(lf);
+  printf("==== END LOGS ====\n");
+}
+#endif
 

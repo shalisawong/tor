@@ -20,6 +20,10 @@
 #include "channel.h"
 #include "circuitbuild.h"
 #include "circuitlist.h"
+
+/*CLIENTLOGGING */
+#include "clientlogging.h"
+
 #include "command.h"
 #include "connection.h"
 #include "connection_or.h"
@@ -227,34 +231,6 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
             (unsigned)cell->circ_id,
             U64_PRINTF_ARG(chan->global_identifier), chan);
 
-  /* We check for the conditions that would make us drop the cell before
-   * we check for the conditions that would make us send a DESTROY back,
-   * since those conditions would make a DESTROY nonsensical. */
-  if (cell->circ_id == 0) {
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
-           "Received a create cell (type %d) from %s with zero circID; "
-           " ignoring.", (int)cell->command,
-           channel_get_actual_remote_descr(chan));
-    return;
-  }
-
-  if (circuit_id_in_use_on_channel(cell->circ_id, chan)) {
-    const node_t *node = node_get_by_id(chan->identity_digest);
-    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
-           "Received CREATE cell (circID %u) for known circ. "
-           "Dropping (age %d).",
-           (unsigned)cell->circ_id,
-           (int)(time(NULL) - channel_when_created(chan)));
-    if (node) {
-      char *p = esc_for_log(node_get_platform(node));
-      log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
-             "Details: router %s, platform %s.",
-             node_describe(node), p);
-      tor_free(p);
-    }
-    return;
-  }
-
   if (we_are_hibernating()) {
     log_info(LD_OR,
              "Received create cell but we're shutting down. Sending back "
@@ -276,6 +252,14 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     return;
   }
 
+  if (cell->circ_id == 0) {
+    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+           "Received a create cell (type %d) from %s with zero circID; "
+           " ignoring.", (int)cell->command,
+           channel_get_actual_remote_descr(chan));
+    return;
+  }
+
   /* If the high bit of the circuit ID is not as expected, close the
    * circ. */
   if (chan->wide_circ_ids)
@@ -294,6 +278,23 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     return;
   }
 
+  if (circuit_id_in_use_on_channel(cell->circ_id, chan)) {
+    const node_t *node = node_get_by_id(chan->identity_digest);
+    log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+           "Received CREATE cell (circID %u) for known circ. "
+           "Dropping (age %d).",
+           (unsigned)cell->circ_id,
+           (int)(time(NULL) - channel_when_created(chan)));
+    if (node) {
+      char *p = esc_for_log(node_get_platform(node));
+      log_fn(LOG_PROTOCOL_WARN, LD_PROTOCOL,
+             "Details: router %s, platform %s.",
+             node_describe(node), p);
+      tor_free(p);
+    }
+    return;
+  }
+
   circ = or_circuit_new(cell->circ_id, chan);
   circ->base_.purpose = CIRCUIT_PURPOSE_OR;
   circuit_set_state(TO_CIRCUIT(circ), CIRCUIT_STATE_ONIONSKIN_PENDING);
@@ -306,6 +307,19 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
     return;
   }
 
+  /*     
+   * CLIENTLOGGING: Is it a known router?
+   */
+  if (!router_get_by_id_digest(chan->identity_digest)) {
+    /* If it is not a known router, presumably, it is a client. 
+     * Not the best way to determine if we are talking to an OP. 
+     * It could be a bridge, which is not a known relay.  
+     */
+    chan->cllog_is_likely_op = 1;
+  } else {
+    chan->cllog_is_likely_op = 0;
+  }
+
   if (create_cell->handshake_type != ONION_HANDSHAKE_TYPE_FAST) {
     /* hand it off to the cpuworkers, and then return. */
     if (connection_or_digest_is_known_relay(chan->identity_digest))
@@ -316,6 +330,7 @@ command_process_create_cell(cell_t *cell, channel_t *chan)
       return;
     }
     log_debug(LD_OR,"success: handed off onionskin.");
+
   } else {
     /* This is a CREATE_FAST cell; we can handle it immediately without using
      * a CPU worker. */
@@ -379,7 +394,7 @@ command_process_created_cell(cell_t *cell, channel_t *chan)
     return;
   }
 
-  if (circ->n_circ_id != cell->circ_id || circ->n_chan != chan) {
+  if (circ->n_circ_id != cell->circ_id) {
     log_fn(LOG_PROTOCOL_WARN,LD_PROTOCOL,
            "got created cell from Tor client? Closing.");
     circuit_mark_for_close(circ, END_CIRC_REASON_TORPROTOCOL);
@@ -410,6 +425,14 @@ command_process_created_cell(cell_t *cell, channel_t *chan)
       return;
     }
   } else { /* pack it into an extended relay cell, and send it. */
+
+    /*
+     *  CLIENTLOGGING: log CREATE. Under else because we don't want it 
+     *  to be an OP.
+     */
+    cllog_log_cell(circ, cell, CELL_DIRECTION_OUT, CELL_CREATE);
+
+
     uint8_t command=0;
     uint16_t len=0;
     uint8_t payload[RELAY_PAYLOAD_SIZE];
@@ -464,7 +487,6 @@ command_process_relay_cell(cell_t *cell, channel_t *chan)
   }
 
   if (!CIRCUIT_IS_ORIGIN(circ) &&
-      chan == TO_OR_CIRCUIT(circ)->p_chan &&
       cell->circ_id == TO_OR_CIRCUIT(circ)->p_circ_id)
     direction = CELL_DIRECTION_OUT;
   else
@@ -533,9 +555,11 @@ command_process_destroy_cell(cell_t *cell, channel_t *chan)
   circ->received_destroy = 1;
 
   if (!CIRCUIT_IS_ORIGIN(circ) &&
-      chan == TO_OR_CIRCUIT(circ)->p_chan &&
       cell->circ_id == TO_OR_CIRCUIT(circ)->p_circ_id) {
     /* the destroy came from behind */
+    /* CLIENTLOGGING: log CELL_DESTROY cell */
+    cllog_log_cell(circ, cell, CELL_DIRECTION_OUT, CELL_DESTROY);
+
     circuit_set_p_circid_chan(TO_OR_CIRCUIT(circ), 0, NULL);
     circuit_mark_for_close(circ, reason|END_CIRC_REASON_FLAG_REMOTE);
   } else { /* the destroy came from ahead */

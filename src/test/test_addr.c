@@ -73,7 +73,7 @@ test_addr_basic(void)
   }
 
  done:
-  tor_free(cp);
+  ;
 }
 
 #define test_op_ip6_(a,op,b,e1,e2)                               \
@@ -346,9 +346,6 @@ test_addr_ip6_helpers(void)
   test_pton6_bad("a:::b:c");
   test_pton6_bad(":::a:b:c");
   test_pton6_bad("a:b:c:::");
-  test_pton6_bad("1.2.3.4");
-  test_pton6_bad(":1.2.3.4");
-  test_pton6_bad(".2.3.4");
 
   /* test internal checking */
   test_external_ip("fbff:ffff::2:7", 0);
@@ -405,6 +402,7 @@ test_addr_ip6_helpers(void)
   test_internal_ip("::ffff:169.254.0.0", 0);
   test_internal_ip("::ffff:169.254.255.255", 0);
   test_external_ip("::ffff:169.255.0.0", 0);
+  test_assert(is_internal_IP(0x7f000001, 0));
 
   /* tor_addr_compare(tor_addr_t x2) */
   test_addr_compare("ffff::", ==, "ffff::0");
@@ -746,88 +744,41 @@ test_addr_parse(void)
   /* Correct call. */
   r= tor_addr_port_parse(LOG_DEBUG,
                          "192.0.2.1:1234",
-                         &addr, &port, -1);
+                         &addr, &port);
   test_assert(r == 0);
   tor_addr_to_str(buf, &addr, sizeof(buf), 0);
   test_streq(buf, "192.0.2.1");
   test_eq(port, 1234);
 
-  r= tor_addr_port_parse(LOG_DEBUG,
-                         "[::1]:1234",
-                         &addr, &port, -1);
-  test_assert(r == 0);
-  tor_addr_to_str(buf, &addr, sizeof(buf), 0);
-  test_streq(buf, "::1");
-  test_eq(port, 1234);
-
   /* Domain name. */
   r= tor_addr_port_parse(LOG_DEBUG,
                          "torproject.org:1234",
-                         &addr, &port, -1);
+                         &addr, &port);
   test_assert(r == -1);
 
   /* Only IP. */
   r= tor_addr_port_parse(LOG_DEBUG,
                          "192.0.2.2",
-                         &addr, &port, -1);
+                         &addr, &port);
   test_assert(r == -1);
-
-  r= tor_addr_port_parse(LOG_DEBUG,
-                         "192.0.2.2",
-                         &addr, &port, 200);
-  test_assert(r == 0);
-  tt_int_op(port,==,200);
-
-  r= tor_addr_port_parse(LOG_DEBUG,
-                         "[::1]",
-                         &addr, &port, -1);
-  test_assert(r == -1);
-
-  r= tor_addr_port_parse(LOG_DEBUG,
-                         "[::1]",
-                         &addr, &port, 400);
-  test_assert(r == 0);
-  tt_int_op(port,==,400);
 
   /* Bad port. */
   r= tor_addr_port_parse(LOG_DEBUG,
                          "192.0.2.2:66666",
-                         &addr, &port, -1);
-  test_assert(r == -1);
-  r= tor_addr_port_parse(LOG_DEBUG,
-                         "192.0.2.2:66666",
-                         &addr, &port, 200);
+                         &addr, &port);
   test_assert(r == -1);
 
   /* Only domain name */
   r= tor_addr_port_parse(LOG_DEBUG,
                          "torproject.org",
-                         &addr, &port, -1);
-  test_assert(r == -1);
-  r= tor_addr_port_parse(LOG_DEBUG,
-                         "torproject.org",
-                         &addr, &port, 200);
+                         &addr, &port);
   test_assert(r == -1);
 
   /* Bad IP address */
   r= tor_addr_port_parse(LOG_DEBUG,
                          "192.0.2:1234",
-                         &addr, &port, -1);
+                         &addr, &port);
   test_assert(r == -1);
-
-  /* Make sure that the default port has lower priority than the real
-     one */
-  r= tor_addr_port_parse(LOG_DEBUG,
-                         "192.0.2.2:1337",
-                         &addr, &port, 200);
-  test_assert(r == 0);
-  tt_int_op(port,==,1337);
-
-  r= tor_addr_port_parse(LOG_DEBUG,
-                         "[::1]:1369",
-                         &addr, &port, 200);
-  test_assert(r == 0);
-  tt_int_op(port,==,1369);
 
  done:
   ;
@@ -1020,32 +971,6 @@ test_addr_is_loopback(void *data)
   ;
 }
 
-static void
-test_addr_make_null(void *data)
-{
-  tor_addr_t *addr = tor_malloc(sizeof(*addr));
-  tor_addr_t *zeros = tor_malloc_zero(sizeof(*addr));
-  char buf[TOR_ADDR_BUF_LEN];
-  (void) data;
-  /* Ensure that before tor_addr_make_null, addr != 0's */
-  memset(addr, 1, sizeof(*addr));
-  tt_int_op(memcmp(addr, zeros, sizeof(*addr)), !=, 0);
-  /* Test with AF == AF_INET */
-  zeros->family = AF_INET;
-  tor_addr_make_null(addr, AF_INET);
-  tt_int_op(memcmp(addr, zeros, sizeof(*addr)), ==, 0);
-  tt_str_op(tor_addr_to_str(buf, addr, sizeof(buf), 0), ==, "0.0.0.0");
-  /* Test with AF == AF_INET6 */
-  memset(addr, 1, sizeof(*addr));
-  zeros->family = AF_INET6;
-  tor_addr_make_null(addr, AF_INET6);
-  tt_int_op(memcmp(addr, zeros, sizeof(*addr)), ==, 0);
-  tt_str_op(tor_addr_to_str(buf, addr, sizeof(buf), 0), ==, "::");
- done:
-  tor_free(addr);
-  tor_free(zeros);
-}
-
 #define ADDR_LEGACY(name)                                               \
   { #name, legacy_test_helper, 0, &legacy_setup, test_addr_ ## name }
 
@@ -1058,7 +983,6 @@ struct testcase_t addr_tests[] = {
   { "dup_ip", test_addr_dup_ip, 0, NULL, NULL },
   { "sockaddr_to_str", test_addr_sockaddr_to_str, 0, NULL, NULL },
   { "is_loopback", test_addr_is_loopback, 0, NULL, NULL },
-  { "make_null", test_addr_make_null, 0, NULL, NULL },
   END_OF_TESTCASES
 };
 

@@ -95,7 +95,12 @@ typedef struct channel_idmap_entry_s {
 static INLINE unsigned
 channel_idmap_hash(const channel_idmap_entry_t *ent)
 {
-  return (unsigned) siphash24g(ent->digest, DIGEST_LEN);
+  const unsigned *a = (const unsigned *)ent->digest;
+#if SIZEOF_INT == 4
+  return a[0] ^ a[1] ^ a[2] ^ a[3] ^ a[4];
+#elif SIZEOF_INT == 8
+  return a[0] ^ a[1];
+#endif
 }
 
 static INLINE int
@@ -112,9 +117,7 @@ HT_GENERATE(channel_idmap, channel_idmap_entry_s, node, channel_idmap_hash,
 
 static cell_queue_entry_t * cell_queue_entry_dup(cell_queue_entry_t *q);
 static void cell_queue_entry_free(cell_queue_entry_t *q, int handed_off);
-#if 0
 static int cell_queue_entry_is_padding(cell_queue_entry_t *q);
-#endif
 static cell_queue_entry_t *
 cell_queue_entry_new_fixed(cell_t *cell);
 static cell_queue_entry_t *
@@ -728,10 +731,10 @@ channel_init(channel_t *chan)
   chan->global_identifier = n_channels_allocated++;
 
   /* Init timestamp */
-  chan->timestamp_last_had_circuits = time(NULL);
+  chan->timestamp_last_added_nonpadding = time(NULL);
 
-  /* Warn about exhausted circuit IDs no more than hourly. */
-  chan->last_warned_circ_ids_exhausted.rate = 3600;
+  /* Init next_circ_id */
+  chan->next_circ_id = crypto_rand_int(1 << 15);
 
   /* Initialize queues. */
   TOR_SIMPLEQ_INIT(&chan->incoming_queue);
@@ -802,7 +805,7 @@ channel_free(channel_t *chan)
 
   /* Get rid of cmux */
   if (chan->cmux) {
-    circuitmux_detach_all_circuits(chan->cmux, NULL);
+    circuitmux_detach_all_circuits(chan->cmux);
     circuitmux_mark_destroyed_circids_usable(chan->cmux, chan);
     circuitmux_free(chan->cmux);
     chan->cmux = NULL;
@@ -1597,7 +1600,6 @@ cell_queue_entry_free(cell_queue_entry_t *q, int handed_off)
   tor_free(q);
 }
 
-#if 0
 /**
  * Check whether a cell queue entry is padding; this is a helper function
  * for channel_write_cell_queue_entry()
@@ -1626,7 +1628,6 @@ cell_queue_entry_is_padding(cell_queue_entry_t *q)
 
   return 0;
 }
-#endif
 
 /**
  * Allocate a new cell queue entry for a fixed-size cell
@@ -1684,6 +1685,11 @@ channel_write_cell_queue_entry(channel_t *chan, cell_queue_entry_t *q)
   tor_assert(chan->state == CHANNEL_STATE_OPENING ||
              chan->state == CHANNEL_STATE_OPEN ||
              chan->state == CHANNEL_STATE_MAINT);
+
+  /* Increment the timestamp unless it's padding */
+  if (!cell_queue_entry_is_padding(q)) {
+    chan->timestamp_last_added_nonpadding = approx_time();
+  }
 
   {
     circid_t circ_id;
@@ -2859,7 +2865,7 @@ channel_free_list(smartlist_t *channels, int mark_for_close)
               channel_state_to_string(curr->state), curr->state);
     /* Detach circuits early so they can find the channel */
     if (curr->cmux) {
-      circuitmux_detach_all_circuits(curr->cmux, NULL);
+      circuitmux_detach_all_circuits(curr->cmux);
     }
     channel_unregister(curr);
     if (mark_for_close) {

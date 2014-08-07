@@ -25,6 +25,7 @@ int networkstatus_check_consensus_signature(networkstatus_t *consensus,
 int networkstatus_check_document_signature(const networkstatus_t *consensus,
                                            document_signature_t *sig,
                                            const authority_cert_t *cert);
+char *networkstatus_get_cache_filename(const char *identity_digest);
 int compare_digest_to_routerstatus_entry(const void *_key,
                                          const void **_member);
 int compare_digest_to_vote_routerstatus_entry(const void *_key,
@@ -53,7 +54,7 @@ int networkstatus_nickname_is_unnamed(const char *nickname);
 void networkstatus_consensus_download_failed(int status_code,
                                              const char *flavname);
 void update_consensus_networkstatus_fetch_time(time_t now);
-int should_delay_dir_fetches(const or_options_t *options,const char **msg_out);
+int should_delay_dir_fetches(const or_options_t *options);
 void update_networkstatus_downloads(time_t now);
 void update_certificate_downloads(time_t now);
 int consensus_is_waiting_for_certs(void);
@@ -98,10 +99,6 @@ void document_signature_free(document_signature_t *sig);
 document_signature_t *document_signature_dup(const document_signature_t *sig);
 void networkstatus_free_all(void);
 int networkstatus_get_weight_scale_param(networkstatus_t *ns);
-
-#ifdef NETWORKSTATUS_PRIVATE
-STATIC void vote_routerstatus_free(vote_routerstatus_t *rs);
-#endif
 
 #endif
 

@@ -93,7 +93,7 @@ down bugs.
 Jenkins
 ~~~~~~~
 
-https://jenkins.torproject.org
+http://jenkins.torproject.org
 
 Dmalloc
 ~~~~~~~
@@ -122,7 +122,7 @@ Running gcov for unit test coverage
    make
    make check
    mkdir coverage-output
-   ./scripts/test/coverage coverage-output
+   ./contrib/coverage coverage-output
 -----
 
 (On OSX, you'll need to start with "--enable-coverage CC=clang".)
@@ -142,7 +142,7 @@ If you have two different "coverage-output" directories, and you want to see
 a meaningful diff between them, you can run:
 
 -----
-   ./scripts/test/cov-diff coverage-output1 coverage-output2 | less
+   ./contrib/cov-diff coverage-output1 coverage-output2 | less
 -----
 
 In this diff, any lines that were visited at least once will have coverage
@@ -449,18 +449,17 @@ of them and reordering to focus on what users and funders would find
 interesting and understandable.
 
    2.1) Make sure that everything that wants a bug number has one.
-        Make sure that everything which is a bugfix says what version
-        it was a bugfix on.
    2.2) Concatenate them.
-   2.3) Sort them by section. Within each section, sort by "version it's
-        a bugfix on", else by numerical ticket order.
+   2.3) Sort them by section.  Within each section, try to make the
+      first entry or two and the last entry most interesting: they're
+      the ones that skimmers tend to read.
 
    2.4) Clean them up:
 
    Standard idioms:
      "Fixes bug 9999; bugfix on 0.3.3.3-alpha."
 
-   One space after a period.
+   One period after a space.
 
    Make stuff very terse
 
@@ -474,10 +473,6 @@ interesting and understandable.
    Avoid starting lines with open-paren
 
    Present and imperative tense: not past.
-
-   'Relays', not 'servers' or 'nodes' or 'Tor relays'.
-
-   "Stop FOOing", not "Fix a bug where we would FOO".
 
    Try not to let any given section be longer than about a page. Break up
    long sections into subsections by some sort of common subtopic. This
@@ -519,7 +514,8 @@ in their approved versions list.
 "include/versions.wmi" and "Makefile" to note the new version. From your
 website checkout, run ./publish to build and publish the website.
 
-9) Email the packagers (cc'ing tor-assistants) that a new tarball is up.
+9) Email Erinn and weasel (cc'ing tor-assistants) that a new tarball
+is up. This step should probably change to mailing more packagers.
 
 10) Add the version number to Trac.  To do this, go to Trac, log in,
 select "Admin" near the top of the screen, then select "Versions" from
@@ -530,16 +526,12 @@ the date in the ChangeLog.
 
 11) Forward-port the ChangeLog.
 
+12) Update the topic in #tor to reflect the new version.
+
 12) Wait up to a day or two (for a development release), or until most
 packages are up (for a stable release), and mail the release blurb and
 changelog to tor-talk or tor-announce.
 
   (We might be moving to faster announcements, but don't announce until
   the website is at least updated.)
-
-13) If it's a stable release, bump the version number in the maint-x.y.z
-    branch to "newversion-dev", and do a "merge -s ours" merge to avoid
-    taking that change into master.  Do a similar 'merge -s theirs'
-    merge to get the change (and only that change) into release.  (Some
-    of the build scripts require that maint merge cleanly into release.)
 

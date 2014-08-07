@@ -54,7 +54,6 @@
 #include "routerparse.h"
 #include "statefile.h"
 #include "status.h"
-#include "util_process.h"
 #include "ext_orport.h"
 #ifdef USE_DMALLOC
 #include <dmalloc.h>
@@ -470,15 +469,15 @@ get_connection_array(void)
 
 /** Provides the traffic read and written over the life of the process. */
 
-MOCK_IMPL(uint64_t,
-get_bytes_read,(void))
+uint64_t
+get_bytes_read(void)
 {
   return stats_n_bytes_read;
 }
 
 /* DOCDOC get_bytes_written */
-MOCK_IMPL(uint64_t,
-get_bytes_written,(void))
+uint64_t
+get_bytes_written(void)
 {
   return stats_n_bytes_written;
 }
@@ -920,7 +919,16 @@ conn_close_if_marked(int i)
       return 0;
     }
     if (connection_wants_to_flush(conn)) {
-      log_fn(LOG_INFO, LD_NET, "We stalled too much while trying to write %d "
+      int severity;
+      if (conn->type == CONN_TYPE_EXIT ||
+          (conn->type == CONN_TYPE_OR && server_mode(get_options())) ||
+          (conn->type == CONN_TYPE_DIR && conn->purpose == DIR_PURPOSE_SERVER))
+        severity = LOG_INFO;
+      else
+        severity = LOG_NOTICE;
+      /* XXXX Maybe allow this to happen a certain amount per hour; it usually
+       * is meaningless. */
+      log_fn(severity, LD_NET, "We stalled too much while trying to write %d "
              "bytes to address %s.  If this happens a lot, either "
              "something is wrong with your network connection, or "
              "something is wrong with theirs. "
@@ -1002,6 +1010,15 @@ directory_info_has_arrived(time_t now, int from_cache)
     consider_testing_reachability(1, 1);
 }
 
+/** How long do we wait before killing OR connections with no circuits?
+ * In Tor versions up to 0.2.1.25 and 0.2.2.12-alpha, we waited 15 minutes
+ * before cancelling these connections, which caused fast relays to accrue
+ * many many idle connections. Hopefully 3 minutes is low enough that
+ * it kills most idle connections, without being so low that we cause
+ * clients to bounce on and off.
+ */
+#define IDLE_OR_CONN_TIMEOUT 180
+
 /** Perform regular maintenance tasks for a single connection.  This
  * function gets run once per second per connection by run_scheduled_events.
  */
@@ -1012,8 +1029,6 @@ run_connection_housekeeping(int i, time_t now)
   connection_t *conn = smartlist_get(connection_array, i);
   const or_options_t *options = get_options();
   or_connection_t *or_conn;
-  channel_t *chan = NULL;
-  int have_any_circuits;
   int past_keepalive =
     now >= conn->timestamp_lastwritten + options->KeepalivePeriod;
 
@@ -1063,18 +1078,8 @@ run_connection_housekeeping(int i, time_t now)
   tor_assert(conn->outbuf);
 #endif
 
-  chan = TLS_CHAN_TO_BASE(or_conn->chan);
-  tor_assert(chan);
-
-  if (channel_num_circuits(chan) != 0) {
-    have_any_circuits = 1;
-    chan->timestamp_last_had_circuits = now;
-  } else {
-    have_any_circuits = 0;
-  }
-
   if (channel_is_bad_for_new_circs(TLS_CHAN_TO_BASE(or_conn->chan)) &&
-      ! have_any_circuits) {
+      !connection_or_get_num_circuits(or_conn)) {
     /* It's bad for new circuits, and has no unmarked circuits on it:
      * mark it now. */
     log_info(LD_OR,
@@ -1093,22 +1098,19 @@ run_connection_housekeeping(int i, time_t now)
       connection_or_close_normally(TO_OR_CONN(conn), 0);
     }
   } else if (we_are_hibernating() &&
-             ! have_any_circuits &&
+             !connection_or_get_num_circuits(or_conn) &&
              !connection_get_outbuf_len(conn)) {
     /* We're hibernating, there's no circuits, and nothing to flush.*/
     log_info(LD_OR,"Expiring non-used OR connection to fd %d (%s:%d) "
              "[Hibernating or exiting].",
              (int)conn->s,conn->address, conn->port);
     connection_or_close_normally(TO_OR_CONN(conn), 1);
-  } else if (!have_any_circuits &&
-             now - or_conn->idle_timeout >=
-                                         chan->timestamp_last_had_circuits) {
+  } else if (!connection_or_get_num_circuits(or_conn) &&
+             now >= or_conn->timestamp_last_added_nonpadding +
+                                         IDLE_OR_CONN_TIMEOUT) {
     log_info(LD_OR,"Expiring non-used OR connection to fd %d (%s:%d) "
-             "[no circuits for %d; timeout %d; %scanonical].",
-             (int)conn->s, conn->address, conn->port,
-             (int)(now - chan->timestamp_last_had_circuits),
-             or_conn->idle_timeout,
-             or_conn->is_canonical ? "" : "non");
+             "[idle %d].", (int)conn->s,conn->address, conn->port,
+             (int)(now - or_conn->timestamp_last_added_nonpadding));
     connection_or_close_normally(TO_OR_CONN(conn), 0);
   } else if (
       now >= or_conn->timestamp_lastempty + options->KeepalivePeriod*10 &&
@@ -1160,18 +1162,6 @@ get_signewnym_epoch(void)
   return newnym_epoch;
 }
 
-static time_t time_to_check_descriptor = 0;
-/**
- * Update our schedule so that we'll check whether we need to update our
- * descriptor immediately, rather than after up to CHECK_DESCRIPTOR_INTERVAL
- * seconds.
- */
-void
-reschedule_descriptor_update_check(void)
-{
-  time_to_check_descriptor = 0;
-}
-
 /** Perform regular maintenance tasks.  This function gets run once per
  * second by second_elapsed_callback().
  */
@@ -1181,6 +1171,7 @@ run_scheduled_events(time_t now)
   static time_t last_rotated_x509_certificate = 0;
   static time_t time_to_check_v3_certificate = 0;
   static time_t time_to_check_listeners = 0;
+  static time_t time_to_check_descriptor = 0;
   static time_t time_to_download_networkstatus = 0;
   static time_t time_to_shrink_memory = 0;
   static time_t time_to_try_getting_descriptors = 0;
@@ -1205,11 +1196,21 @@ run_scheduled_events(time_t now)
   int i;
   int have_dir_info;
 
-  /* 0. See if we've been asked to shut down and our timeout has
+  /** 0. See if we've been asked to shut down and our timeout has
    * expired; or if our bandwidth limits are exhausted and we
    * should hibernate; or if it's time to wake up from hibernation.
    */
   consider_hibernation(now);
+
+#if 0
+  {
+    static time_t nl_check_time = 0;
+    if (nl_check_time <= now) {
+      nodelist_assert_ok();
+      nl_check_time = now + 30;
+    }
+  }
+#endif
 
   /* 0b. If we've deferred a signewnym, make sure it gets handled
    * eventually. */
@@ -1222,7 +1223,7 @@ run_scheduled_events(time_t now)
   /* 0c. If we've deferred log messages for the controller, handle them now */
   flush_pending_log_callbacks();
 
-  /* 1a. Every MIN_ONION_KEY_LIFETIME seconds, rotate the onion keys,
+  /** 1a. Every MIN_ONION_KEY_LIFETIME seconds, rotate the onion keys,
    *  shut down and restart all cpuworkers, and update the directory if
    *  necessary.
    */
@@ -1238,8 +1239,7 @@ run_scheduled_events(time_t now)
       router_upload_dir_desc_to_dirservers(0);
   }
 
-  if (!should_delay_dir_fetches(options, NULL) &&
-      time_to_try_getting_descriptors < now) {
+  if (!options->DisableNetwork && time_to_try_getting_descriptors < now) {
     update_all_descriptor_downloads(now);
     update_extrainfo_downloads(now);
     if (router_have_minimum_dir_info())
@@ -1254,10 +1254,10 @@ run_scheduled_events(time_t now)
       now + DESCRIPTOR_FAILURE_RESET_INTERVAL;
   }
 
-  if (options->UseBridges && !options->DisableNetwork)
+  if (options->UseBridges)
     fetch_bridge_descriptors(options, now);
 
-  /* 1b. Every MAX_SSL_KEY_LIFETIME_INTERNAL seconds, we change our
+  /** 1b. Every MAX_SSL_KEY_LIFETIME_INTERNAL seconds, we change our
    * TLS context. */
   if (!last_rotated_x509_certificate)
     last_rotated_x509_certificate = now;
@@ -1283,7 +1283,7 @@ run_scheduled_events(time_t now)
     time_to_add_entropy = now + ENTROPY_INTERVAL;
   }
 
-  /* 1c. If we have to change the accounting interval or record
+  /** 1c. If we have to change the accounting interval or record
    * bandwidth used in this accounting interval, do so. */
   if (accounting_is_enabled(options))
     accounting_run_housekeeping(now);
@@ -1296,7 +1296,7 @@ run_scheduled_events(time_t now)
     dirserv_test_reachability(now);
   }
 
-  /* 1d. Periodically, we discount older stability information so that new
+  /** 1d. Periodically, we discount older stability information so that new
    * stability info counts more, and save the stability information to disk as
    * appropriate. */
   if (time_to_downrate_stability < now)
@@ -1415,7 +1415,7 @@ run_scheduled_events(time_t now)
       dns_init();
   }
 
-  /* 2. Periodically, we consider force-uploading our descriptor
+  /** 2. Periodically, we consider force-uploading our descriptor
    * (if we've passed our internal checks). */
 
 /** How often do we check whether part of our router info has changed in a
@@ -1469,18 +1469,17 @@ run_scheduled_events(time_t now)
  * documents? */
 #define networkstatus_dl_check_interval(o) ((o)->TestingTorNetwork ? 1 : 60)
 
-  if (!should_delay_dir_fetches(options, NULL) &&
-      time_to_download_networkstatus < now) {
+  if (time_to_download_networkstatus < now && !options->DisableNetwork) {
     time_to_download_networkstatus =
       now + networkstatus_dl_check_interval(options);
     update_networkstatus_downloads(now);
   }
 
-  /* 2c. Let directory voting happen. */
+  /** 2c. Let directory voting happen. */
   if (authdir_mode_v3(options))
     dirvote_act(options, now);
 
-  /* 3a. Every second, we examine pending circuits and prune the
+  /** 3a. Every second, we examine pending circuits and prune the
    *    ones which have been pending for more than a few seconds.
    *    We do this before step 4, so it can try building more if
    *    it's not comfortable with the number of available circuits.
@@ -1489,24 +1488,24 @@ run_scheduled_events(time_t now)
    * it can't, currently), we should do this more often.) */
   circuit_expire_building();
 
-  /* 3b. Also look at pending streams and prune the ones that 'began'
+  /** 3b. Also look at pending streams and prune the ones that 'began'
    *     a long time ago but haven't gotten a 'connected' yet.
    *     Do this before step 4, so we can put them back into pending
    *     state to be picked up by the new circuit.
    */
   connection_ap_expire_beginning();
 
-  /* 3c. And expire connections that we've held open for too long.
+  /** 3c. And expire connections that we've held open for too long.
    */
   connection_expire_held_open();
 
-  /* 3d. And every 60 seconds, we relaunch listeners if any died. */
+  /** 3d. And every 60 seconds, we relaunch listeners if any died. */
   if (!net_is_disabled() && time_to_check_listeners < now) {
     retry_all_listeners(NULL, NULL, 0);
     time_to_check_listeners = now+60;
   }
 
-  /* 4. Every second, we try a new circuit if there are no valid
+  /** 4. Every second, we try a new circuit if there are no valid
    *    circuits. Every NewCircuitPeriod seconds, we expire circuits
    *    that became dirty more than MaxCircuitDirtiness seconds ago,
    *    and we make a new circ if there are no clean circuits.
@@ -1519,7 +1518,7 @@ run_scheduled_events(time_t now)
   if (now % 10 == 5)
     circuit_expire_old_circuits_serverside(now);
 
-  /* 5. We do housekeeping for each connection... */
+  /** 5. We do housekeeping for each connection... */
   connection_or_set_bad_connections(NULL, 0);
   for (i=0;i<smartlist_len(connection_array);i++) {
     run_connection_housekeeping(i, now);
@@ -1531,9 +1530,7 @@ run_scheduled_events(time_t now)
         if (conn->inbuf)
           buf_shrink(conn->inbuf);
       });
-#ifdef ENABLE_MEMPOOL
     clean_cell_pool();
-#endif /* ENABLE_MEMPOOL */
     buf_shrink_freelists(0);
 /** How often do we check buffers and pools for empty space that can be
  * deallocated? */
@@ -1541,35 +1538,33 @@ run_scheduled_events(time_t now)
     time_to_shrink_memory = now + MEM_SHRINK_INTERVAL;
   }
 
-  /* 6. And remove any marked circuits... */
+  /** 6. And remove any marked circuits... */
   circuit_close_all_marked();
 
-  /* 7. And upload service descriptors if necessary. */
+  /** 7. And upload service descriptors if necessary. */
   if (can_complete_circuit && !net_is_disabled()) {
     rend_consider_services_upload(now);
     rend_consider_descriptor_republication();
   }
 
-  /* 8. and blow away any connections that need to die. have to do this now,
+  /** 8. and blow away any connections that need to die. have to do this now,
    * because if we marked a conn for close and left its socket -1, then
    * we'll pass it to poll/select and bad things will happen.
    */
   close_closeable_connections();
 
-  /* 8b. And if anything in our state is ready to get flushed to disk, we
+  /** 8b. And if anything in our state is ready to get flushed to disk, we
    * flush it. */
   or_state_save(now);
 
-  /* 8c. Do channel cleanup just like for connections */
+  /** 8c. Do channel cleanup just like for connections */
   channel_run_cleanup();
   channel_listener_run_cleanup();
 
-  /* 9. and if we're an exit node, check whether our DNS is telling stories
-   * to us. */
+  /** 9. and if we're a server, check whether our DNS is telling stories to
+   * us. */
   if (!net_is_disabled() &&
-      public_server_mode(options) &&
-      time_to_check_for_correct_dns < now &&
-      ! router_my_exit_policy_is_reject_star()) {
+      public_server_mode(options) && time_to_check_for_correct_dns < now) {
     if (!time_to_check_for_correct_dns) {
       time_to_check_for_correct_dns = now + 60 + crypto_rand_int(120);
     } else {
@@ -1579,7 +1574,7 @@ run_scheduled_events(time_t now)
     }
   }
 
-  /* 10. write bridge networkstatus file to disk */
+  /** 10. write bridge networkstatus file to disk */
   if (options->BridgeAuthoritativeDir &&
       time_to_write_bridge_status_file < now) {
     networkstatus_dump_bridge_status_to_file(now);
@@ -1587,7 +1582,7 @@ run_scheduled_events(time_t now)
     time_to_write_bridge_status_file = now+BRIDGE_STATUSFILE_INTERVAL;
   }
 
-  /* 11. check the port forwarding app */
+  /** 11. check the port forwarding app */
   if (!net_is_disabled() &&
       time_to_check_port_forwarding < now &&
       options->PortForwarding &&
@@ -1605,11 +1600,11 @@ run_scheduled_events(time_t now)
     time_to_check_port_forwarding = now+PORT_FORWARDING_CHECK_INTERVAL;
   }
 
-  /* 11b. check pending unconfigured managed proxies */
+  /** 11b. check pending unconfigured managed proxies */
   if (!net_is_disabled() && pt_proxies_configuration_pending())
     pt_configure_remaining_proxies();
 
-  /* 12. write the heartbeat message */
+  /** 12. write the heartbeat message */
   if (options->HeartbeatPeriod &&
       time_to_next_heartbeat <= now) {
     if (time_to_next_heartbeat) /* don't log the first heartbeat */
@@ -1683,28 +1678,24 @@ second_elapsed_callback(periodic_timer_t *timer, void *arg)
     /* every 20 minutes, check and complain if necessary */
     const routerinfo_t *me = router_get_my_routerinfo();
     if (me && !check_whether_orport_reachable()) {
-      char *address = tor_dup_ip(me->addr);
       log_warn(LD_CONFIG,"Your server (%s:%d) has not managed to confirm that "
                "its ORPort is reachable. Please check your firewalls, ports, "
                "address, /etc/hosts file, etc.",
-               address, me->or_port);
+               me->address, me->or_port);
       control_event_server_status(LOG_WARN,
                                   "REACHABILITY_FAILED ORADDRESS=%s:%d",
-                                  address, me->or_port);
-      tor_free(address);
+                                  me->address, me->or_port);
     }
 
     if (me && !check_whether_dirport_reachable()) {
-      char *address = tor_dup_ip(me->addr);
       log_warn(LD_CONFIG,
                "Your server (%s:%d) has not managed to confirm that its "
                "DirPort is reachable. Please check your firewalls, ports, "
                "address, /etc/hosts file, etc.",
-               address, me->dir_port);
+               me->address, me->dir_port);
       control_event_server_status(LOG_WARN,
                                   "REACHABILITY_FAILED DIRADDRESS=%s:%d",
-                                  address, me->dir_port);
-      tor_free(address);
+                                  me->address, me->dir_port);
     }
   }
 
@@ -1766,7 +1757,7 @@ refill_callback(periodic_timer_t *timer, void *arg)
     accounting_add_bytes(bytes_read, bytes_written, seconds_rolled_over);
 
   if (milliseconds_elapsed > 0)
-    connection_bucket_refill(milliseconds_elapsed, (time_t)now.tv_sec);
+    connection_bucket_refill(milliseconds_elapsed, now.tv_sec);
 
   stats_prev_global_read_bucket = global_read_bucket;
   stats_prev_global_write_bucket = global_write_bucket;
@@ -1938,10 +1929,8 @@ do_main_loop(void)
     }
   }
 
-#ifdef ENABLE_MEMPOOLS
   /* Set up the packed_cell_t memory pool. */
   init_cell_pool();
-#endif /* ENABLE_MEMPOOLS */
 
   /* Set up our buckets */
   connection_bucket_init();
@@ -2110,7 +2099,8 @@ process_signal(uintptr_t sig)
       break;
 #ifdef SIGCHLD
     case SIGCHLD:
-      notify_pending_waitpid_callbacks();
+      while (waitpid(-1,NULL,WNOHANG) > 0) ; /* keep reaping until no more
+                                                zombies */
       break;
 #endif
     case SIGNEWNYM: {
@@ -2133,8 +2123,8 @@ process_signal(uintptr_t sig)
 }
 
 /** Returns Tor's uptime. */
-MOCK_IMPL(long,
-get_uptime,(void))
+long
+get_uptime(void)
 {
   return stats_n_seconds_working;
 }
@@ -2339,13 +2329,6 @@ tor_init(int argc, char *argv[])
   /* Have the log set up with our application name. */
   tor_snprintf(progname, sizeof(progname), "Tor %s", get_version());
   log_set_application_name(progname);
-
-  /* Set up the crypto nice and early */
-  if (crypto_early_init() < 0) {
-    log_err(LD_GENERAL, "Unable to initialize the crypto subsystem!");
-    return 1;
-  }
-
   /* Initialize the history structures. */
   rep_hist_init();
   /* Initialize the service cache. */
@@ -2444,9 +2427,6 @@ tor_init(int argc, char *argv[])
     return -1;
   }
   stream_choice_seed_weak_rng();
-  if (tor_init_libevent_rng() < 0) {
-    log_warn(LD_NET, "Problem initializing libevent RNG.");
-  }
 
   return 0;
 }
@@ -2551,21 +2531,15 @@ tor_free_all(int postfork)
   microdesc_free_all();
   ext_orport_free_all();
   control_free_all();
-  sandbox_free_getaddrinfo_cache();
   if (!postfork) {
     config_free_all();
     or_state_free_all();
     router_free_all();
     policies_free_all();
   }
-#ifdef ENABLE_MEMPOOLS
   free_cell_pool();
-#endif /* ENABLE_MEMPOOLS */
   if (!postfork) {
     tor_tls_free_all();
-#ifndef _WIN32
-    tor_getpwnam(NULL);
-#endif
   }
   /* stuff in main.c */
 
@@ -2597,19 +2571,10 @@ tor_cleanup(void)
     time_t now = time(NULL);
     /* Remove our pid file. We don't care if there was an error when we
      * unlink, nothing we could do about it anyways. */
-    if (options->PidFile) {
-      if (unlink(options->PidFile) != 0) {
-        log_warn(LD_FS, "Couldn't unlink pid file %s: %s",
-                 options->PidFile, strerror(errno));
-      }
-    }
-    if (options->ControlPortWriteToFile) {
-      if (unlink(options->ControlPortWriteToFile) != 0) {
-        log_warn(LD_FS, "Couldn't unlink control port file %s: %s",
-                 options->ControlPortWriteToFile,
-                 strerror(errno));
-      }
-    }
+    if (options->PidFile)
+      unlink(options->PidFile);
+    if (options->ControlPortWriteToFile)
+      unlink(options->ControlPortWriteToFile);
     if (accounting_is_enabled(options))
       accounting_record_bandwidth_usage(now, get_or_state());
     or_state_mark_dirty(get_or_state(), 0); /* force an immediate save. */
@@ -2706,6 +2671,31 @@ do_dump_config(void)
   return 0;
 }
 
+#if defined (WINCE)
+int
+find_flashcard_path(PWCHAR path, size_t size)
+{
+  WIN32_FIND_DATA d = {0};
+  HANDLE h = NULL;
+
+  if (!path)
+    return -1;
+
+  h = FindFirstFlashCard(&d);
+  if (h == INVALID_HANDLE_VALUE)
+    return -1;
+
+  if (wcslen(d.cFileName) == 0) {
+    FindClose(h);
+    return -1;
+  }
+
+  wcsncpy(path,d.cFileName,size);
+  FindClose(h);
+  return 0;
+}
+#endif
+
 static void
 init_addrinfo(void)
 {
@@ -2719,208 +2709,76 @@ init_addrinfo(void)
 static sandbox_cfg_t*
 sandbox_init_filter(void)
 {
-  const or_options_t *options = get_options();
   sandbox_cfg_t *cfg = sandbox_cfg_new();
-  int i;
 
   sandbox_cfg_allow_openat_filename(&cfg,
-      get_datadir_fname("cached-status"));
+      get_datadir_fname("cached-status"), 1);
 
   sandbox_cfg_allow_open_filename_array(&cfg,
-      get_datadir_fname("cached-certs"),
-      get_datadir_fname("cached-certs.tmp"),
-      get_datadir_fname("cached-consensus"),
-      get_datadir_fname("cached-consensus.tmp"),
-      get_datadir_fname("unverified-consensus"),
-      get_datadir_fname("unverified-consensus.tmp"),
-      get_datadir_fname("unverified-microdesc-consensus"),
-      get_datadir_fname("unverified-microdesc-consensus.tmp"),
-      get_datadir_fname("cached-microdesc-consensus"),
-      get_datadir_fname("cached-microdesc-consensus.tmp"),
-      get_datadir_fname("cached-microdescs"),
-      get_datadir_fname("cached-microdescs.tmp"),
-      get_datadir_fname("cached-microdescs.new"),
-      get_datadir_fname("cached-microdescs.new.tmp"),
-      get_datadir_fname("cached-descriptors"),
-      get_datadir_fname("cached-descriptors.new"),
-      get_datadir_fname("cached-descriptors.tmp"),
-      get_datadir_fname("cached-descriptors.new.tmp"),
-      get_datadir_fname("cached-descriptors.tmp.tmp"),
-      get_datadir_fname("cached-extrainfo"),
-      get_datadir_fname("cached-extrainfo.new"),
-      get_datadir_fname("cached-extrainfo.tmp"),
-      get_datadir_fname("cached-extrainfo.new.tmp"),
-      get_datadir_fname("cached-extrainfo.tmp.tmp"),
-      get_datadir_fname("state.tmp"),
-      get_datadir_fname("unparseable-desc.tmp"),
-      get_datadir_fname("unparseable-desc"),
-      get_datadir_fname("v3-status-votes"),
-      get_datadir_fname("v3-status-votes.tmp"),
-      tor_strdup("/dev/srandom"),
-      tor_strdup("/dev/urandom"),
-      tor_strdup("/dev/random"),
-      tor_strdup("/etc/hosts"),
-      tor_strdup("/proc/meminfo"),
+      get_datadir_fname("cached-certs"), 1,
+      get_datadir_fname("cached-certs.tmp"), 1,
+      get_datadir_fname("cached-consensus"), 1,
+      get_datadir_fname("unverified-consensus"), 1,
+      get_datadir_fname("unverified-consensus.tmp"), 1,
+      get_datadir_fname("cached-microdesc-consensus"), 1,
+      get_datadir_fname("cached-microdesc-consensus.tmp"), 1,
+      get_datadir_fname("cached-microdescs"), 1,
+      get_datadir_fname("cached-microdescs.tmp"), 1,
+      get_datadir_fname("cached-microdescs.new"), 1,
+      get_datadir_fname("cached-microdescs.new.tmp"), 1,
+      get_datadir_fname("unverified-microdesc-consensus"), 1,
+      get_datadir_fname("cached-descriptors"), 1,
+      get_datadir_fname("cached-descriptors.new"), 1,
+      get_datadir_fname("cached-descriptors.tmp"), 1,
+      get_datadir_fname("cached-descriptors.new.tmp"), 1,
+      get_datadir_fname("cached-descriptors.tmp.tmp"), 1,
+      get_datadir_fname("cached-extrainfo"), 1,
+      get_datadir_fname("state.tmp"), 1,
+      get_datadir_fname("unparseable-desc.tmp"), 1,
+      get_datadir_fname("unparseable-desc"), 1,
+      "/dev/srandom", 0,
+      "/dev/urandom", 0,
+      "/dev/random", 0,
       NULL, 0
   );
-  if (options->ServerDNSResolvConfFile)
-    sandbox_cfg_allow_open_filename(&cfg,
-                                tor_strdup(options->ServerDNSResolvConfFile));
-  else
-    sandbox_cfg_allow_open_filename(&cfg, tor_strdup("/etc/resolv.conf"));
-
-  for (i = 0; i < 2; ++i) {
-    if (get_torrc_fname(i)) {
-      sandbox_cfg_allow_open_filename(&cfg, tor_strdup(get_torrc_fname(i)));
-    }
-  }
-
-#define RENAME_SUFFIX(name, suffix)        \
-  sandbox_cfg_allow_rename(&cfg,           \
-      get_datadir_fname(name suffix),      \
-      get_datadir_fname(name))
-
-#define RENAME_SUFFIX2(prefix, name, suffix) \
-  sandbox_cfg_allow_rename(&cfg,                                        \
-                           get_datadir_fname2(prefix, name suffix),     \
-                           get_datadir_fname2(prefix, name))
-
-  RENAME_SUFFIX("cached-certs", ".tmp");
-  RENAME_SUFFIX("cached-consensus", ".tmp");
-  RENAME_SUFFIX("unverified-consensus", ".tmp");
-  RENAME_SUFFIX("unverified-microdesc-consensus", ".tmp");
-  RENAME_SUFFIX("cached-microdesc-consensus", ".tmp");
-  RENAME_SUFFIX("cached-microdescs", ".tmp");
-  RENAME_SUFFIX("cached-microdescs", ".new");
-  RENAME_SUFFIX("cached-microdescs.new", ".tmp");
-  RENAME_SUFFIX("cached-descriptors", ".tmp");
-  RENAME_SUFFIX("cached-descriptors", ".new");
-  RENAME_SUFFIX("cached-descriptors.new", ".tmp");
-  RENAME_SUFFIX("cached-extrainfo", ".tmp");
-  RENAME_SUFFIX("cached-extrainfo", ".new");
-  RENAME_SUFFIX("cached-extrainfo.new", ".tmp");
-  RENAME_SUFFIX("state", ".tmp");
-  RENAME_SUFFIX("unparseable-desc", ".tmp");
-  RENAME_SUFFIX("v3-status-votes", ".tmp");
 
   sandbox_cfg_allow_stat_filename_array(&cfg,
-      get_datadir_fname(NULL),
-      get_datadir_fname("lock"),
-      get_datadir_fname("state"),
-      get_datadir_fname("router-stability"),
-      get_datadir_fname("cached-extrainfo.new"),
+      get_datadir_fname(NULL), 1,
+      get_datadir_fname("lock"), 1,
+      get_datadir_fname("state"), 1,
+      get_datadir_fname("router-stability"), 1,
+      get_datadir_fname("cached-extrainfo.new"), 1,
       NULL, 0
   );
-
-  {
-    smartlist_t *files = smartlist_new();
-    tor_log_get_logfile_names(files);
-    SMARTLIST_FOREACH(files, char *, file_name, {
-      /* steals reference */
-      sandbox_cfg_allow_open_filename(&cfg, file_name);
-    });
-    smartlist_free(files);
-  }
-
-  {
-    smartlist_t *files = smartlist_new();
-    smartlist_t *dirs = smartlist_new();
-    rend_services_add_filenames_to_lists(files, dirs);
-    SMARTLIST_FOREACH(files, char *, file_name, {
-      char *tmp_name = NULL;
-      tor_asprintf(&tmp_name, "%s.tmp", file_name);
-      sandbox_cfg_allow_rename(&cfg,
-                               tor_strdup(tmp_name), tor_strdup(file_name));
-      /* steals references */
-      sandbox_cfg_allow_open_filename_array(&cfg, file_name, tmp_name, NULL);
-    });
-    SMARTLIST_FOREACH(dirs, char *, dir, {
-      /* steals reference */
-      sandbox_cfg_allow_stat_filename(&cfg, dir);
-    });
-    smartlist_free(files);
-    smartlist_free(dirs);
-  }
-
-  {
-    char *fname;
-    if ((fname = get_controller_cookie_file_name())) {
-      sandbox_cfg_allow_open_filename(&cfg, fname);
-    }
-    if ((fname = get_ext_or_auth_cookie_file_name())) {
-      sandbox_cfg_allow_open_filename(&cfg, fname);
-    }
-  }
-
-  if (options->DirPortFrontPage) {
-    sandbox_cfg_allow_open_filename(&cfg,
-                                    tor_strdup(options->DirPortFrontPage));
-  }
 
   // orport
   if (server_mode(get_options())) {
     sandbox_cfg_allow_open_filename_array(&cfg,
-        get_datadir_fname2("keys", "secret_id_key"),
-        get_datadir_fname2("keys", "secret_onion_key"),
-        get_datadir_fname2("keys", "secret_onion_key_ntor"),
-        get_datadir_fname2("keys", "secret_onion_key_ntor.tmp"),
-        get_datadir_fname2("keys", "secret_id_key.old"),
-        get_datadir_fname2("keys", "secret_onion_key.old"),
-        get_datadir_fname2("keys", "secret_onion_key_ntor.old"),
-        get_datadir_fname2("keys", "secret_onion_key.tmp"),
-        get_datadir_fname2("keys", "secret_id_key.tmp"),
-        get_datadir_fname2("stats", "bridge-stats"),
-        get_datadir_fname2("stats", "bridge-stats.tmp"),
-        get_datadir_fname2("stats", "dirreq-stats"),
-        get_datadir_fname2("stats", "dirreq-stats.tmp"),
-        get_datadir_fname2("stats", "entry-stats"),
-        get_datadir_fname2("stats", "entry-stats.tmp"),
-        get_datadir_fname2("stats", "exit-stats"),
-        get_datadir_fname2("stats", "exit-stats.tmp"),
-        get_datadir_fname2("stats", "buffer-stats"),
-        get_datadir_fname2("stats", "buffer-stats.tmp"),
-        get_datadir_fname2("stats", "conn-stats"),
-        get_datadir_fname2("stats", "conn-stats.tmp"),
-        get_datadir_fname("approved-routers"),
-        get_datadir_fname("fingerprint"),
-        get_datadir_fname("fingerprint.tmp"),
-        get_datadir_fname("hashed-fingerprint"),
-        get_datadir_fname("hashed-fingerprint.tmp"),
-        get_datadir_fname("router-stability"),
-        get_datadir_fname("router-stability.tmp"),
-        tor_strdup("/etc/resolv.conf"),
+        get_datadir_fname2("keys", "secret_id_key"), 1,
+        get_datadir_fname2("keys", "secret_onion_key"), 1,
+        get_datadir_fname2("keys", "secret_onion_key_ntor"), 1,
+        get_datadir_fname2("keys", "secret_onion_key_ntor.tmp"), 1,
+        get_datadir_fname2("keys", "secret_id_key.old"), 1,
+        get_datadir_fname2("keys", "secret_onion_key.old"), 1,
+        get_datadir_fname2("keys", "secret_onion_key_ntor.old"), 1,
+        get_datadir_fname2("keys", "secret_onion_key.tmp"), 1,
+        get_datadir_fname2("keys", "secret_id_key.tmp"), 1,
+        get_datadir_fname("fingerprint"), 1,
+        get_datadir_fname("fingerprint.tmp"), 1,
+        get_datadir_fname("cached-consensus"), 1,
+        get_datadir_fname("cached-consensus.tmp"), 1,
+        "/etc/resolv.conf", 0,
         NULL, 0
     );
 
-    RENAME_SUFFIX("fingerprint", ".tmp");
-    RENAME_SUFFIX2("keys", "secret_onion_key_ntor", ".tmp");
-    RENAME_SUFFIX2("keys", "secret_id_key", ".tmp");
-    RENAME_SUFFIX2("keys", "secret_id_key.old", ".tmp");
-    RENAME_SUFFIX2("keys", "secret_onion_key", ".tmp");
-    RENAME_SUFFIX2("keys", "secret_onion_key.old", ".tmp");
-    RENAME_SUFFIX2("stats", "bridge-stats", ".tmp");
-    RENAME_SUFFIX2("stats", "dirreq-stats", ".tmp");
-    RENAME_SUFFIX2("stats", "entry-stats", ".tmp");
-    RENAME_SUFFIX2("stats", "exit-stats", ".tmp");
-    RENAME_SUFFIX2("stats", "buffer-stats", ".tmp");
-    RENAME_SUFFIX2("stats", "conn-stats", ".tmp");
-    RENAME_SUFFIX("hashed-fingerprint", ".tmp");
-    RENAME_SUFFIX("router-stability", ".tmp");
-
-    sandbox_cfg_allow_rename(&cfg,
-             get_datadir_fname2("keys", "secret_onion_key"),
-             get_datadir_fname2("keys", "secret_onion_key.old"));
-    sandbox_cfg_allow_rename(&cfg,
-             get_datadir_fname2("keys", "secret_onion_key_ntor"),
-             get_datadir_fname2("keys", "secret_onion_key_ntor.old"));
-
     sandbox_cfg_allow_stat_filename_array(&cfg,
-        get_datadir_fname("keys"),
-        get_datadir_fname("stats"),
-        get_datadir_fname2("stats", "dirreq-stats"),
+        get_datadir_fname("keys"), 1,
+        get_datadir_fname("stats/dirreq-stats"), 1,
         NULL, 0
     );
   }
+
+  sandbox_cfg_allow_execve(&cfg, "/usr/local/bin/tor");
 
   init_addrinfo();
 
@@ -2934,6 +2792,31 @@ int
 tor_main(int argc, char *argv[])
 {
   int result = 0;
+#if defined (WINCE)
+  WCHAR path [MAX_PATH] = {0};
+  WCHAR fullpath [MAX_PATH] = {0};
+  PWCHAR p = NULL;
+  FILE* redir = NULL;
+  FILE* redirdbg = NULL;
+
+  // this is to facilitate debugging by opening
+  // a file on a folder shared by the wm emulator.
+  // if no flashcard (real or emulated) is present,
+  // log files will be written in the root folder
+  if (find_flashcard_path(path,MAX_PATH) == -1) {
+    redir = _wfreopen( L"\\stdout.log", L"w", stdout );
+    redirdbg = _wfreopen( L"\\stderr.log", L"w", stderr );
+  } else {
+    swprintf(fullpath,L"\\%s\\tor",path);
+    CreateDirectory(fullpath,NULL);
+
+    swprintf(fullpath,L"\\%s\\tor\\stdout.log",path);
+    redir = _wfreopen( fullpath, L"w", stdout );
+
+    swprintf(fullpath,L"\\%s\\tor\\stderr.log",path);
+    redirdbg = _wfreopen( fullpath, L"w", stderr );
+  }
+#endif
 
 #ifdef _WIN32
   /* Call SetProcessDEPPolicy to permanently enable DEP.
@@ -2971,7 +2854,7 @@ tor_main(int argc, char *argv[])
   if (tor_init(argc, argv)<0)
     return -1;
 
-  if (get_options()->Sandbox && get_options()->command == CMD_RUN_TOR) {
+  if (get_options()->Sandbox) {
     sandbox_cfg_t* cfg = sandbox_init_filter();
 
     if (sandbox_init(cfg)) {

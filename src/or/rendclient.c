@@ -670,9 +670,8 @@ directory_get_from_hs_dir(const char *desc_id, const rend_data_t *rend_query)
                       "service directories, because we requested them all "
                       "recently without success.");
     if (options->StrictNodes && excluded_some) {
-      log_warn(LD_REND, "Could not pick a hidden service directory for the "
-               "requested hidden service: they are all either down or "
-               "excluded, and StrictNodes is set.");
+      log_info(LD_REND, "There are others that we could have tried, but "
+               "they are all excluded, and StrictNodes is set.");
     }
     return 0;
   }
@@ -797,7 +796,8 @@ rend_client_cancel_descriptor_fetches(void)
 
   SMARTLIST_FOREACH_BEGIN(connection_array, connection_t *, conn) {
     if (conn->type == CONN_TYPE_DIR &&
-        conn->purpose == DIR_PURPOSE_FETCH_RENDDESC_V2) {
+        (conn->purpose == DIR_PURPOSE_FETCH_RENDDESC ||
+         conn->purpose == DIR_PURPOSE_FETCH_RENDDESC_V2)) {
       /* It's a rendezvous descriptor fetch in progress -- cancel it
        * by marking the connection for close.
        *

@@ -35,15 +35,6 @@
 #ifdef HAVE_UNAME
 #include <sys/utsname.h>
 #endif
-#ifdef HAVE_SYS_TYPES_H
-#include <sys/types.h>
-#endif
-#ifdef HAVE_SYS_SYSCTL_H
-#include <sys/sysctl.h>
-#endif
-#ifdef HAVE_SYS_STAT_H
-#include <sys/stat.h>
-#endif
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
@@ -114,12 +105,6 @@
 /* Only use the linux prctl;  the IRIX prctl is totally different */
 #include <sys/prctl.h>
 #endif
-#ifdef TOR_UNIT_TESTS
-#if !defined(HAVE_USLEEP) && defined(HAVE_SYS_SELECT_H)
-/* as fallback implementation for tor_sleep_msec */
-#include <sys/select.h>
-#endif
-#endif
 
 #include "torlog.h"
 #include "util.h"
@@ -153,7 +138,6 @@ tor_open_cloexec(const char *path, int flags, unsigned mode)
     return -1;
 #endif
 
-  log_debug(LD_FS, "Opening %s with flags %x", path, flags);
   fd = open(path, flags, mode);
 #ifdef FD_CLOEXEC
   if (fd >= 0) {
@@ -185,15 +169,6 @@ tor_fopen_cloexec(const char *path, const char *mode)
   return result;
 }
 
-/** As rename(), but work correctly with the sandbox. */
-int
-tor_rename(const char *path_old, const char *path_new)
-{
-  log_debug(LD_FS, "Renaming %s to %s", path_old, path_new);
-  return rename(sandbox_intern_string(path_old),
-                sandbox_intern_string(path_new));
-}
-
 #if defined(HAVE_SYS_MMAN_H) || defined(RUNNING_DOXYGEN)
 /** Try to create a memory mapping for <b>filename</b> and return it.  On
  * failure, return NULL.  Sets errno properly, using ERANGE to mean
@@ -203,10 +178,9 @@ tor_mmap_file(const char *filename)
 {
   int fd; /* router file */
   char *string;
-  int page_size, result;
+  int page_size;
   tor_mmap_t *res;
   size_t size, filesize;
-  struct stat st;
 
   tor_assert(filename);
 
@@ -220,22 +194,9 @@ tor_mmap_file(const char *filename)
     return NULL;
   }
 
-  /* Get the size of the file */
-  result = fstat(fd, &st);
-  if (result != 0) {
-    int save_errno = errno;
-    log_warn(LD_FS,
-             "Couldn't fstat opened descriptor for \"%s\" during mmap: %s",
-             filename, strerror(errno));
-    close(fd);
-    errno = save_errno;
-    return NULL;
-  }
-  size = filesize = (size_t)(st.st_size);
-  /*
-   * Should we check for weird crap like mmapping a named pipe here,
-   * or just wait for if (!size) below to fail?
-   */
+  /* XXXX why not just do fstat here? */
+  size = filesize = (size_t) lseek(fd, 0, SEEK_END);
+  lseek(fd, 0, SEEK_SET);
   /* ensure page alignment */
   page_size = getpagesize();
   size += (size%page_size) ? page_size-(size%page_size) : 0;
@@ -266,27 +227,12 @@ tor_mmap_file(const char *filename)
 
   return res;
 }
-/** Release storage held for a memory mapping; returns 0 on success,
- * or -1 on failure (and logs a warning). */
-int
+/** Release storage held for a memory mapping. */
+void
 tor_munmap_file(tor_mmap_t *handle)
 {
-  int res;
-
-  if (handle == NULL)
-    return 0;
-
-  res = munmap((char*)handle->data, handle->mapping_size);
-  if (res == 0) {
-    /* munmap() succeeded */
-    tor_free(handle);
-  } else {
-    log_warn(LD_FS, "Failed to munmap() in tor_munmap_file(): %s",
-             strerror(errno));
-    res = -1;
-  }
-
-  return res;
+  munmap((char*)handle->data, handle->mapping_size);
+  tor_free(handle);
 }
 #elif defined(_WIN32)
 tor_mmap_t *
@@ -368,29 +314,17 @@ tor_mmap_file(const char *filename)
   tor_munmap_file(res);
   return NULL;
 }
-
-/* Unmap the file, and return 0 for success or -1 for failure */
-int
+void
 tor_munmap_file(tor_mmap_t *handle)
 {
-  if (handle == NULL)
-    return 0;
-
-  if (handle->data) {
+  if (handle->data)
     /* This is an ugly cast, but without it, "data" in struct tor_mmap_t would
        have to be redefined as non-const. */
-    BOOL ok = UnmapViewOfFile( (LPVOID) handle->data);
-    if (!ok) {
-      log_warn(LD_FS, "Failed to UnmapViewOfFile() in tor_munmap_file(): %d",
-               (int)GetLastError());
-    }
-  }
+    UnmapViewOfFile( (LPVOID) handle->data);
 
   if (handle->mmap_handle != NULL)
     CloseHandle(handle->mmap_handle);
   tor_free(handle);
-
-  return 0;
 }
 #else
 tor_mmap_t *
@@ -406,25 +340,13 @@ tor_mmap_file(const char *filename)
   handle->size = st.st_size;
   return handle;
 }
-
-/** Unmap the file mapped with tor_mmap_file(), and return 0 for success
- * or -1 for failure.
- */
-
-int
+void
 tor_munmap_file(tor_mmap_t *handle)
 {
-  char *d = NULL;
-  if (handle == NULL)
-    return 0;
-
-  d = (char*)handle->data;
+  char *d = (char*)handle->data;
   tor_free(d);
   memwipe(handle, 0, sizeof(tor_mmap_t));
   tor_free(handle);
-
-  /* Can't fail in this mmap()/munmap()-free case */
-  return 0;
 }
 #endif
 
@@ -579,29 +501,21 @@ tor_memmem(const void *_haystack, size_t hlen,
 #else
   /* This isn't as fast as the GLIBC implementation, but it doesn't need to
    * be. */
-  const char *p, *last_possible_start;
+  const char *p, *end;
   const char *haystack = (const char*)_haystack;
   const char *needle = (const char*)_needle;
   char first;
   tor_assert(nlen);
 
-  if (nlen > hlen)
-    return NULL;
-
   p = haystack;
-  /* Last position at which the needle could start. */
-  last_possible_start = haystack + hlen - nlen;
+  end = haystack + hlen;
   first = *(const char*)needle;
-  while ((p = memchr(p, first, last_possible_start + 1 - p))) {
+  while ((p = memchr(p, first, end-p))) {
+    if (p+nlen > end)
+      return NULL;
     if (fast_memeq(p, needle, nlen))
       return p;
-    if (++p > last_possible_start) {
-      /* This comparison shouldn't be necessary, since if p was previously
-       * equal to last_possible_start, the next memchr call would be
-       * "memchr(p, first, 0)", which will return NULL. But it clarifies the
-       * logic. */
-      return NULL;
-    }
+    ++p;
   }
   return NULL;
 #endif
@@ -818,7 +732,7 @@ int
 replace_file(const char *from, const char *to)
 {
 #ifndef _WIN32
-  return tor_rename(from, to);
+  return rename(from,to);
 #else
   switch (file_status(to))
     {
@@ -833,7 +747,7 @@ replace_file(const char *from, const char *to)
       errno = EISDIR;
       return -1;
     }
-  return tor_rename(from,to);
+  return rename(from,to);
 #endif
 }
 
@@ -1708,106 +1622,6 @@ log_credential_status(void)
 }
 #endif
 
-#ifndef _WIN32
-/** Cached struct from the last getpwname() call we did successfully. */
-static struct passwd *passwd_cached = NULL;
-
-/** Helper: copy a struct passwd object.
- *
- * We only copy the fields pw_uid, pw_gid, pw_name, pw_dir.  Tor doesn't use
- * any others, and I don't want to run into incompatibilities.
- */
-static struct passwd *
-tor_passwd_dup(const struct passwd *pw)
-{
-  struct passwd *new_pw = tor_malloc_zero(sizeof(struct passwd));
-  if (pw->pw_name)
-    new_pw->pw_name = tor_strdup(pw->pw_name);
-  if (pw->pw_dir)
-    new_pw->pw_dir = tor_strdup(pw->pw_dir);
-  new_pw->pw_uid = pw->pw_uid;
-  new_pw->pw_gid = pw->pw_gid;
-
-  return new_pw;
-}
-
-/** Helper: free one of our cached 'struct passwd' values. */
-static void
-tor_passwd_free(struct passwd *pw)
-{
-  if (!pw)
-    return;
-
-  tor_free(pw->pw_name);
-  tor_free(pw->pw_dir);
-  tor_free(pw);
-}
-
-/** Wrapper around getpwnam() that caches result. Used so that we don't need
- * to give the sandbox access to /etc/passwd.
- *
- * The following fields alone will definitely be copied in the output: pw_uid,
- * pw_gid, pw_name, pw_dir.  Other fields are not present in cached values.
- *
- * When called with a NULL argument, this function clears storage associated
- * with static variables it uses.
- **/
-const struct passwd *
-tor_getpwnam(const char *username)
-{
-  struct passwd *pw;
-
-  if (username == NULL) {
-    tor_passwd_free(passwd_cached);
-    passwd_cached = NULL;
-    return NULL;
-  }
-
-  if ((pw = getpwnam(username))) {
-    tor_passwd_free(passwd_cached);
-    passwd_cached = tor_passwd_dup(pw);
-    log_notice(LD_GENERAL, "Caching new entry %s for %s",
-               passwd_cached->pw_name, username);
-    return pw;
-  }
-
-  /* Lookup failed */
-  if (! passwd_cached || ! passwd_cached->pw_name)
-    return NULL;
-
-  if (! strcmp(username, passwd_cached->pw_name))
-    return passwd_cached;
-
-  return NULL;
-}
-
-/** Wrapper around getpwnam() that can use cached result from
- * tor_getpwnam(). Used so that we don't need to give the sandbox access to
- * /etc/passwd.
- *
- * The following fields alone will definitely be copied in the output: pw_uid,
- * pw_gid, pw_name, pw_dir.  Other fields are not present in cached values.
- */
-const struct passwd *
-tor_getpwuid(uid_t uid)
-{
-  struct passwd *pw;
-
-  if ((pw = getpwuid(uid))) {
-    return pw;
-  }
-
-  /* Lookup failed */
-  if (! passwd_cached)
-    return NULL;
-
-  if (uid == passwd_cached->pw_uid)
-    return passwd_cached;
-
-  return NULL;
-}
-#endif
-
 /** Call setuid and setgid to run as <b>user</b> and switch to their
  * primary group.  Return 0 on success.  On failure, log and return -1.
  */
@@ -1815,7 +1629,7 @@ int
 switch_id(const char *user)
 {
 #ifndef _WIN32
-  const struct passwd *pw = NULL;
+  struct passwd *pw = NULL;
   uid_t old_uid;
   gid_t old_gid;
   static int have_already_switched_id = 0;
@@ -1836,7 +1650,7 @@ switch_id(const char *user)
   old_gid = getgid();
 
   /* Lookup the user and group information, if we have a problem, bail out. */
-  pw = tor_getpwnam(user);
+  pw = getpwnam(user);
   if (pw == NULL) {
     log_warn(LD_CONFIG, "Error setting configured user: %s not found", user);
     return -1;
@@ -2007,10 +1821,10 @@ tor_disable_debugger_attach(void)
 char *
 get_user_homedir(const char *username)
 {
-  const struct passwd *pw;
+  struct passwd *pw;
   tor_assert(username);
 
-  if (!(pw = tor_getpwnam(username))) {
+  if (!(pw = getpwnam(username))) {
     log_err(LD_CONFIG,"User \"%s\" not found.", username);
     return NULL;
   }
@@ -2304,10 +2118,8 @@ tor_inet_pton(int af, const char *src, void *dst)
     else {
       unsigned byte1,byte2,byte3,byte4;
       char more;
-      for (eow = dot-1; eow > src && TOR_ISDIGIT(*eow); --eow)
+      for (eow = dot-1; eow >= src && TOR_ISDIGIT(*eow); --eow)
         ;
-      if (*eow != ':')
-        return 0;
       ++eow;
 
       /* We use "scanf" because some platform inet_aton()s are too lax
@@ -2485,11 +2297,13 @@ get_uname(void)
                          "Unrecognized version of Windows [major=%d,minor=%d]",
                          (int)info.dwMajorVersion,(int)info.dwMinorVersion);
         }
+#if !defined (WINCE)
 #ifdef VER_NT_SERVER
       if (info.wProductType == VER_NT_SERVER ||
           info.wProductType == VER_NT_DOMAIN_CONTROLLER) {
         strlcat(uname_result, " [server]", sizeof(uname_result));
       }
+#endif
 #endif
 #else
         strlcpy(uname_result, "Unknown platform", sizeof(uname_result));
@@ -2533,12 +2347,6 @@ tor_pthread_helper_fn(void *_data)
   func(arg);
   return NULL;
 }
-/**
- * A pthread attribute to make threads start detached.
- */
-static pthread_attr_t attr_detached;
-/** True iff we've called tor_threads_init() */
-static int threads_initialized = 0;
 #endif
 
 /** Minimalist interface to run a void function in the background.  On
@@ -2562,12 +2370,12 @@ spawn_func(void (*func)(void *), void *data)
 #elif defined(USE_PTHREADS)
   pthread_t thread;
   tor_pthread_data_t *d;
-  if (PREDICT_UNLIKELY(!threads_initialized))
-    tor_threads_init();
   d = tor_malloc(sizeof(tor_pthread_data_t));
   d->data = data;
   d->func = func;
-  if (pthread_create(&thread,&attr_detached,tor_pthread_helper_fn,d))
+  if (pthread_create(&thread,NULL,tor_pthread_helper_fn,d))
+    return -1;
+  if (pthread_detach(thread))
     return -1;
   return 0;
 #else
@@ -2695,8 +2503,15 @@ tor_gettimeofday(struct timeval *timeval)
     uint64_t ft_64;
     FILETIME ft_ft;
   } ft;
+#if defined (WINCE)
+  /* wince do not have GetSystemTimeAsFileTime */
+  SYSTEMTIME stime;
+  GetSystemTime(&stime);
+  SystemTimeToFileTime(&stime,&ft.ft_ft);
+#else
   /* number of 100-nsec units since Jan 1, 1601 */
   GetSystemTimeAsFileTime(&ft.ft_ft);
+#endif
   if (ft.ft_64 < EPOCH_BIAS) {
     log_err(LD_GENERAL,"System time is before 1970; failing.");
     exit(1);
@@ -2722,7 +2537,7 @@ tor_gettimeofday(struct timeval *timeval)
   return;
 }
 
-#if !defined(_WIN32)
+#if defined(TOR_IS_MULTITHREADED) && !defined(_WIN32)
 /** Defined iff we need to add locks when defining fake versions of reentrant
  * versions of time-related functions. */
 #define TIME_FNS_NEED_LOCKS
@@ -2917,6 +2732,8 @@ tor_get_thread_id(void)
  * "reentrant" mutexes (i.e., once we can re-lock if we're already holding
  * them.) */
 static pthread_mutexattr_t attr_reentrant;
+/** True iff we've called tor_threads_init() */
+static int threads_initialized = 0;
 /** Initialize <b>mutex</b> so it can be locked.  Every mutex must be set
  * up with tor_mutex_init() or tor_mutex_new(); not both. */
 void
@@ -2982,6 +2799,7 @@ tor_get_thread_id(void)
 }
 #endif
 
+#ifdef TOR_IS_MULTITHREADED
 /** Return a newly allocated, ready-for-use mutex. */
 tor_mutex_t *
 tor_mutex_new(void)
@@ -2999,6 +2817,7 @@ tor_mutex_free(tor_mutex_t *m)
   tor_mutex_uninit(m);
   tor_free(m);
 }
+#endif
 
 /* Conditions. */
 #ifdef USE_PTHREADS
@@ -3058,8 +2877,6 @@ tor_threads_init(void)
   if (!threads_initialized) {
     pthread_mutexattr_init(&attr_reentrant);
     pthread_mutexattr_settype(&attr_reentrant, PTHREAD_MUTEX_RECURSIVE);
-    tor_assert(0==pthread_attr_init(&attr_detached));
-    tor_assert(0==pthread_attr_setdetachstate(&attr_detached, 1));
     threads_initialized = 1;
     set_main_thread();
   }
@@ -3432,142 +3249,6 @@ format_win32_error(DWORD err)
     LocalFree(str); /* LocalFree != free() */
   }
   return result;
-}
-#endif
-
-#if defined(HW_PHYSMEM64)
-/* This appears to be an OpenBSD thing */
-#define INT64_HW_MEM HW_PHYSMEM64
-#elif defined(HW_MEMSIZE)
-/* OSX defines this one */
-#define INT64_HW_MEM HW_MEMSIZE
-#endif
-
-/**
- * Helper: try to detect the total system memory, and return it. On failure,
- * return 0.
- */
-static uint64_t
-get_total_system_memory_impl(void)
-{
-#if defined(__linux__)
-  /* On linux, sysctl is deprecated. Because proc is so awesome that you
-   * shouldn't _want_ to write portable code, I guess? */
-  unsigned long long result=0;
-  int fd = -1;
-  char *s = NULL;
-  const char *cp;
-  size_t file_size=0;
-  if (-1 == (fd = tor_open_cloexec("/proc/meminfo",O_RDONLY,0)))
-    return 0;
-  s = read_file_to_str_until_eof(fd, 65536, &file_size);
-  if (!s)
-    goto err;
-  cp = strstr(s, "MemTotal:");
-  if (!cp)
-    goto err;
-  /* Use the system sscanf so that space will match a wider number of space */
-  if (sscanf(cp, "MemTotal: %llu kB\n", &result) != 1)
-    goto err;
-
-  close(fd);
-  tor_free(s);
-  return result * 1024;
-
- err:
-  tor_free(s);
-  close(fd);
-  return 0;
-#elif defined (_WIN32)
-  /* Windows has MEMORYSTATUSEX; pretty straightforward. */
-  MEMORYSTATUSEX ms;
-  memset(&ms, 0, sizeof(ms));
-  ms.dwLength = sizeof(ms);
-  if (! GlobalMemoryStatusEx(&ms))
-    return 0;
-
-  return ms.ullTotalPhys;
-
-#elif defined(HAVE_SYSCTL) && defined(INT64_HW_MEM)
-  /* On many systems, HW_PYHSMEM is clipped to 32 bits; let's use a better
-   * variant if we know about it. */
-  uint64_t memsize = 0;
-  size_t len = sizeof(memsize);
-  int mib[2] = {CTL_HW, INT64_HW_MEM};
-  if (sysctl(mib,2,&memsize,&len,NULL,0))
-    return 0;
-
-  return memsize;
-
-#elif defined(HAVE_SYSCTL) && defined(HW_PHYSMEM)
-  /* On some systems (like FreeBSD I hope) you can use a size_t with
-   * HW_PHYSMEM. */
-  size_t memsize=0;
-  size_t len = sizeof(memsize);
-  int mib[2] = {CTL_HW, HW_USERMEM};
-  if (sysctl(mib,2,&memsize,&len,NULL,0))
-    return -1;
-
-  return memsize;
-
-#else
-  /* I have no clue. */
-  return 0;
-#endif
-}
-
-/**
- * Try to find out how much physical memory the system has. On success,
- * return 0 and set *<b>mem_out</b> to that value. On failure, return -1.
- */
-int
-get_total_system_memory(size_t *mem_out)
-{
-  static size_t mem_cached=0;
-  uint64_t m = get_total_system_memory_impl();
-  if (0 == m) {
-    /* We couldn't find our memory total */
-    if (0 == mem_cached) {
-      /* We have no cached value either */
-      *mem_out = 0;
-      return -1;
-    }
-
-    *mem_out = mem_cached;
-    return 0;
-  }
-
-#if SIZE_T_MAX != UINT64_MAX
-  if (m > SIZE_T_MAX) {
-    /* I think this could happen if we're a 32-bit Tor running on a 64-bit
-     * system: we could have more system memory than would fit in a
-     * size_t. */
-    m = SIZE_T_MAX;
-  }
-#endif
-
-  *mem_out = mem_cached = (size_t) m;
-
-  return 0;
-}
-
-#ifdef TOR_UNIT_TESTS
-/** Delay for <b>msec</b> milliseconds.  Only used in tests. */
-void
-tor_sleep_msec(int msec)
-{
-#ifdef _WIN32
-  Sleep(msec);
-#elif defined(HAVE_USLEEP)
-  sleep(msec / 1000);
-  /* Some usleep()s hate sleeping more than 1 sec */
-  usleep((msec % 1000) * 1000);
-#elif defined(HAVE_SYS_SELECT_H)
-  struct timeval tv = { msec / 1000, (msec % 1000) * 1000};
-  select(0, NULL, NULL, NULL, &tv);
-#else
-  sleep(CEIL_DIV(msec, 1000));
-#endif
 }
 #endif
 

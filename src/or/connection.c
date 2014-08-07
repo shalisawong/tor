@@ -269,6 +269,10 @@ dir_connection_new(int socket_family)
 /** Allocate and return a new or_connection_t, initialized as by
  * connection_init().
  *
+ * Set timestamp_last_added_nonpadding to now.
+ *
+ * Assign a pseudorandom next_circ_id between 0 and 2**15.
+ *
  * Initialize active_circuit_pqueue.
  *
  * Set active_circuit_pqueue_last_recalibrated to current cell_ewma tick.
@@ -281,7 +285,7 @@ or_connection_new(int type, int socket_family)
   tor_assert(type == CONN_TYPE_OR || type == CONN_TYPE_EXT_OR);
   connection_init(now, TO_CONN(or_conn), type, socket_family);
 
-  connection_or_set_canonical(or_conn, 0);
+  or_conn->timestamp_last_added_nonpadding = time(NULL);
 
   if (type == CONN_TYPE_EXT_OR)
     connection_or_set_ext_or_identifier(or_conn);
@@ -954,14 +958,12 @@ check_location_for_unix_socket(const or_options_t *options, const char *path)
 #endif
 
 /** Tell the TCP stack that it shouldn't wait for a long time after
- * <b>sock</b> has closed before reusing its port. Return 0 on success,
- * -1 on failure. */
-static int
+ * <b>sock</b> has closed before reusing its port. */
+static void
 make_socket_reuseable(tor_socket_t sock)
 {
 #ifdef _WIN32
   (void) sock;
-  return 0;
 #else
   int one=1;
 
@@ -971,9 +973,9 @@ make_socket_reuseable(tor_socket_t sock)
    * already has it bound_. So, don't do that on Win32. */
   if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void*) &one,
              (socklen_t)sizeof(one)) == -1) {
-    return -1;
+    log_warn(LD_NET, "Error setting SO_REUSEADDR flag: %s",
+             tor_socket_strerror(errno));
   }
-  return 0;
 #endif
 }
 
@@ -1006,16 +1008,16 @@ tor_listen(tor_socket_t fd)
  */
 static connection_t *
 connection_listener_new(const struct sockaddr *listensockaddr,
-                        socklen_t socklen,
-                        int type, const char *address,
-                        const port_cfg_t *port_cfg)
+                           socklen_t socklen,
+                           int type, const char *address,
+                           const port_cfg_t *port_cfg)
 {
   listener_connection_t *lis_conn;
   connection_t *conn = NULL;
   tor_socket_t s = TOR_INVALID_SOCKET;  /* the socket we're going to make */
   or_options_t const *options = get_options();
 #if defined(HAVE_PWD_H) && defined(HAVE_SYS_UN_H)
-  const struct passwd *pw = NULL;
+  struct passwd *pw = NULL;
 #endif
   uint16_t usePort = 0, gotPort = 0;
   int start_reading = 0;
@@ -1047,11 +1049,7 @@ connection_listener_new(const struct sockaddr *listensockaddr,
       goto err;
     }
 
-    if (make_socket_reuseable(s) < 0) {
-      log_warn(LD_NET, "Error setting SO_REUSEADDR flag on %s: %s",
-               conn_type_to_string(type),
-               tor_socket_strerror(errno));
-    }
+    make_socket_reuseable(s);
 
 #if defined USE_TRANSPARENT && defined(IP_TRANSPARENT)
     if (options->TransProxyType_parsed == TPT_TPROXY &&
@@ -1155,7 +1153,7 @@ connection_listener_new(const struct sockaddr *listensockaddr,
     }
 #ifdef HAVE_PWD_H
     if (options->User) {
-      pw = tor_getpwnam(options->User);
+      pw = getpwnam(options->User);
       if (pw == NULL) {
         log_warn(LD_NET,"Unable to chown() %s socket: user %s not found.",
                  address, options->User);
@@ -1356,18 +1354,7 @@ connection_handle_listener_read(connection_t *conn, int new_type)
             "Connection accepted on socket %d (child of fd %d).",
             (int)news,(int)conn->s);
 
-  if (make_socket_reuseable(news) < 0) {
-    if (tor_socket_errno(news) == EINVAL) {
-      /* This can happen on OSX if we get a badly timed shutdown. */
-      log_debug(LD_NET, "make_socket_reuseable returned EINVAL");
-    } else {
-      log_warn(LD_NET, "Error setting SO_REUSEADDR flag on %s: %s",
-               conn_type_to_string(new_type),
-               tor_socket_strerror(errno));
-    }
-    tor_close_socket(news);
-    return 0;
-  }
+  make_socket_reuseable(news);
 
   if (options->ConstrainedSockets)
     set_constrained_socket_buffers(news, (int)options->ConstrainedSockSize);
@@ -1576,10 +1563,7 @@ connection_connect(connection_t *conn, const char *address,
     return -1;
   }
 
-  if (make_socket_reuseable(s) < 0) {
-    log_warn(LD_NET, "Error setting SO_REUSEADDR flag on new connection: %s",
-             tor_socket_strerror(errno));
-  }
+  make_socket_reuseable(s);
 
   if (!tor_addr_is_loopback(addr)) {
     const tor_addr_t *ext_addr = NULL;
@@ -2243,7 +2227,7 @@ retry_listener_ports(smartlist_t *old_conns,
 
     if (listensockaddr) {
       conn = connection_listener_new(listensockaddr, listensocklen,
-                                     port->type, address, port);
+                                        port->type, address, port);
       tor_free(listensockaddr);
       tor_free(address);
     } else {
@@ -2354,20 +2338,6 @@ connection_mark_all_noncontrol_connections(void)
       case CONN_TYPE_AP:
         connection_mark_unattached_ap(TO_ENTRY_CONN(conn),
                                       END_STREAM_REASON_HIBERNATING);
-        break;
-      case CONN_TYPE_OR:
-        {
-          or_connection_t *orconn = TO_OR_CONN(conn);
-          if (orconn->chan) {
-            connection_or_close_normally(orconn, 0);
-          } else {
-            /*
-             * There should have been one, but mark for close and hope
-             * for the best..
-             */
-            connection_mark_for_close(conn);
-          }
-        }
         break;
       default:
         connection_mark_for_close(conn);
@@ -2543,8 +2513,9 @@ connection_bucket_write_limit(connection_t *conn, time_t now)
  * shouldn't send <b>attempt</b> bytes of low-priority directory stuff
  * out to <b>conn</b>. Else return 0.
 
- * Priority was 1 for v1 requests (directories and running-routers),
- * and 2 for v2 requests and later (statuses and descriptors).
+ * Priority is 1 for v1 requests (directories and running-routers),
+ * and 2 for v2 requests (statuses and descriptors). But see FFFF in
+ * directory_handle_command_get() for why we don't use priority 2 yet.
  *
  * There are a lot of parameters we could use here:
  * - global_relayed_write_bucket. Low is bad.
@@ -4019,12 +3990,6 @@ connection_write_to_buf_impl_,(const char *string, size_t len,
                "write_to_buf failed. Closing circuit (fd %d).", (int)conn->s);
       circuit_mark_for_close(circuit_get_by_edge_conn(TO_EDGE_CONN(conn)),
                              END_CIRC_REASON_INTERNAL);
-    } else if (conn->type == CONN_TYPE_OR) {
-      or_connection_t *orconn = TO_OR_CONN(conn);
-      log_warn(LD_NET,
-               "write_to_buf failed on an orconn; notifying of error "
-               "(fd %d)", (int)(conn->s));
-      connection_or_close_for_error(orconn, 0);
     } else {
       log_warn(LD_NET,
                "write_to_buf failed. Closing connection (fd %d).",
@@ -4199,29 +4164,20 @@ connection_dir_get_by_purpose_and_resource(int purpose,
   return NULL;
 }
 
-/** Return 1 if there are any active OR connections apart from
- * <b>this_conn</b>.
- *
- * We use this to guess if we should tell the controller that we
- * didn't manage to connect to any of our bridges. */
-int
-any_other_active_or_conns(const or_connection_t *this_conn)
+/** Return an open, non-marked connection of a given type and purpose, or NULL
+ * if no such connection exists. */
+connection_t *
+connection_get_by_type_purpose(int type, int purpose)
 {
   smartlist_t *conns = get_connection_array();
-  SMARTLIST_FOREACH_BEGIN(conns, connection_t *, conn) {
-    if (conn == TO_CONN(this_conn)) { /* don't consider this conn */
-      continue;
-    }
-
-    if (conn->type == CONN_TYPE_OR &&
-        !conn->marked_for_close) {
-      log_debug(LD_DIR, "%s: Found an OR connection: %s",
-                __func__, conn->address);
-      return 1;
-    }
-  } SMARTLIST_FOREACH_END(conn);
-
-  return 0;
+  SMARTLIST_FOREACH(conns, connection_t *, conn,
+  {
+    if (conn->type == type &&
+        !conn->marked_for_close &&
+        (purpose == conn->purpose))
+      return conn;
+  });
+  return NULL;
 }
 
 /** Return 1 if <b>conn</b> is a listener conn, else return 0. */
@@ -4810,8 +4766,6 @@ get_proxy_addrport(tor_addr_t *addr, uint16_t *port, int *proxy_type,
     }
   }
 
-  tor_addr_make_unspec(addr);
-  *port = 0;
   *proxy_type = PROXY_NONE;
   return 0;
 }

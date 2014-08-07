@@ -390,13 +390,10 @@ circuitmux_alloc(void)
 
 /**
  * Detach all circuits from a circuitmux (use before circuitmux_free())
- *
- * If <b>detached_out</b> is non-NULL, add every detached circuit_t to
- * detached_out.
  */
 
 void
-circuitmux_detach_all_circuits(circuitmux_t *cmux, smartlist_t *detached_out)
+circuitmux_detach_all_circuits(circuitmux_t *cmux)
 {
   chanid_circid_muxinfo_t **i = NULL, *to_remove;
   channel_t *chan = NULL;
@@ -412,11 +409,7 @@ circuitmux_detach_all_circuits(circuitmux_t *cmux, smartlist_t *detached_out)
   i = HT_START(chanid_circid_muxinfo_map, cmux->chanid_circid_map);
   while (i) {
     to_remove = *i;
-
-    if (! to_remove) {
-      log_warn(LD_BUG, "Somehow, an HT iterator gave us a NULL pointer.");
-      break;
-    } else {
+    if (to_remove) {
       /* Find a channel and circuit */
       chan = channel_find_by_global_id(to_remove->chan_id);
       if (chan) {
@@ -437,9 +430,6 @@ circuitmux_detach_all_circuits(circuitmux_t *cmux, smartlist_t *detached_out)
 
             /* Clear n_mux */
             circ->n_mux = NULL;
-
-            if (detached_out)
-              smartlist_add(detached_out, circ);
           } else if (circ->magic == OR_CIRCUIT_MAGIC) {
             /*
              * Update active_circuits et al.; this does policy notifies, so
@@ -455,9 +445,6 @@ circuitmux_detach_all_circuits(circuitmux_t *cmux, smartlist_t *detached_out)
              * so clear p_mux.
              */
             TO_OR_CIRCUIT(circ)->p_mux = NULL;
-
-            if (detached_out)
-              smartlist_add(detached_out, circ);
           } else {
             /* Complain and move on */
             log_warn(LD_CIRC,
@@ -1907,41 +1894,5 @@ circuitmux_append_destroy_cell(channel_t *chan,
     log_debug(LD_GENERAL, "Primed a buffer.");
     channel_flush_from_first_active_circuit(chan, 1);
   }
-}
-
-/*DOCDOC; for debugging 12184.  This runs slowly. */
-int64_t
-circuitmux_count_queued_destroy_cells(const channel_t *chan,
-                                      const circuitmux_t *cmux)
-{
-  int64_t n_destroy_cells = cmux->destroy_ctr;
-  int64_t destroy_queue_size = cmux->destroy_cell_queue.n;
-
-  int64_t manual_total = 0;
-  int64_t manual_total_in_map = 0;
-  packed_cell_t *cell;
-
-  TOR_SIMPLEQ_FOREACH(cell, &cmux->destroy_cell_queue.head, next) {
-    circid_t id;
-    ++manual_total;
-
-    id = packed_cell_get_circid(cell, chan->wide_circ_ids);
-    if (circuit_id_in_use_on_channel(id, (channel_t*)chan))
-      ++manual_total_in_map;
-  }
-
-  if (n_destroy_cells != destroy_queue_size ||
-      n_destroy_cells != manual_total ||
-      n_destroy_cells != manual_total_in_map) {
-    log_warn(LD_BUG, "  Discrepancy in counts for queued destroy cells on "
-             "circuitmux. n="I64_FORMAT". queue_size="I64_FORMAT". "
-             "manual_total="I64_FORMAT". manual_total_in_map="I64_FORMAT".",
-             I64_PRINTF_ARG(n_destroy_cells),
-             I64_PRINTF_ARG(destroy_queue_size),
-             I64_PRINTF_ARG(manual_total),
-             I64_PRINTF_ARG(manual_total_in_map));
-  }
-
-  return n_destroy_cells;
 }
 

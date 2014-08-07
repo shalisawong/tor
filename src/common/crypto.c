@@ -75,10 +75,12 @@
 /** Macro: is k a valid RSA private key? */
 #define PRIVATE_KEY_OK(k) ((k) && (k)->key && (k)->key->p)
 
+#ifdef TOR_IS_MULTITHREADED
 /** A number of preallocated mutexes for use by OpenSSL. */
 static tor_mutex_t **openssl_mutexes_ = NULL;
 /** How many mutexes have we allocated for use by OpenSSL? */
 static int n_openssl_mutexes_ = 0;
+#endif
 
 /** A public key, or a public/private key-pair. */
 struct crypto_pk_t
@@ -128,9 +130,6 @@ crypto_get_rsa_padding(int padding)
     default: tor_assert(0); return -1;
     }
 }
-
-/** Boolean: has OpenSSL's crypto been initialized? */
-static int crypto_early_initialized_ = 0;
 
 /** Boolean: has OpenSSL's crypto been initialized? */
 static int crypto_global_initialized_ = 0;
@@ -243,49 +242,15 @@ crypto_openssl_get_header_version_str(void)
   return crypto_openssl_header_version_str;
 }
 
-/** Make sure that openssl is using its default PRNG. Return 1 if we had to
- * adjust it; 0 otherwise. */
-static int
-crypto_force_rand_ssleay(void)
-{
-  if (RAND_get_rand_method() != RAND_SSLeay()) {
-    log_notice(LD_CRYPTO, "It appears that one of our engines has provided "
-               "a replacement the OpenSSL RNG. Resetting it to the default "
-               "implementation.");
-    RAND_set_rand_method(RAND_SSLeay());
-    return 1;
-  }
-  return 0;
-}
-
-/** Set up the siphash key if we haven't already done so. */
-int
-crypto_init_siphash_key(void)
-{
-  static int have_seeded_siphash = 0;
-  struct sipkey key;
-  if (have_seeded_siphash)
-    return 0;
-
-  if (crypto_rand((char*) &key, sizeof(key)) < 0)
-    return -1;
-  siphash_set_global_key(&key);
-  have_seeded_siphash = 1;
-  return 0;
-}
-
 /** Initialize the crypto library.  Return 0 on success, -1 on failure.
  */
 int
-crypto_early_init(void)
+crypto_global_init(int useAccel, const char *accelName, const char *accelDir)
 {
-  if (!crypto_early_initialized_) {
-
-    crypto_early_initialized_ = 1;
-
+  if (!crypto_global_initialized_) {
     ERR_load_crypto_strings();
     OpenSSL_add_all_algorithms();
-
+    crypto_global_initialized_ = 1;
     setup_openssl_threading();
 
     if (SSLeay() == OPENSSL_VERSION_NUMBER &&
@@ -306,26 +271,6 @@ crypto_early_init(void)
                  "or later.",
                  crypto_openssl_get_version_str());
     }
-
-    crypto_force_rand_ssleay();
-
-    if (crypto_seed_rng(1) < 0)
-      return -1;
-    if (crypto_init_siphash_key() < 0)
-      return -1;
-  }
-  return 0;
-}
-
-/** Initialize the crypto library.  Return 0 on success, -1 on failure.
- */
-int
-crypto_global_init(int useAccel, const char *accelName, const char *accelDir)
-{
-  if (!crypto_global_initialized_) {
-    crypto_early_init();
-
-    crypto_global_initialized_ = 1;
 
     if (useAccel > 0) {
 #ifdef DISABLE_ENGINES
@@ -390,13 +335,17 @@ crypto_global_init(int useAccel, const char *accelName, const char *accelDir)
       log_info(LD_CRYPTO, "NOT using OpenSSL engine support.");
     }
 
-    if (crypto_force_rand_ssleay()) {
-      if (crypto_seed_rng(1) < 0)
-        return -1;
+    if (RAND_get_rand_method() != RAND_SSLeay()) {
+      log_notice(LD_CRYPTO, "It appears that one of our engines has provided "
+                 "a replacement the OpenSSL RNG. Resetting it to the default "
+                 "implementation.");
+      RAND_set_rand_method(RAND_SSLeay());
     }
 
     evaluate_evp_for_aes(-1);
     evaluate_ctr_for_aes();
+
+    return crypto_seed_rng(1);
   }
   return 0;
 }
@@ -1375,28 +1324,6 @@ crypto_pk_get_fingerprint(crypto_pk_t *pk, char *fp_out, int add_space)
   return 0;
 }
 
-/** Given a private or public key <b>pk</b>, put a hashed fingerprint of
- * the public key into <b>fp_out</b> (must have at least FINGERPRINT_LEN+1
- * bytes of space).  Return 0 on success, -1 on failure.
- *
- * Hashed fingerprints are computed as the SHA1 digest of the SHA1 digest
- * of the ASN.1 encoding of the public key, converted to hexadecimal, in
- * upper case.
- */
-int
-crypto_pk_get_hashed_fingerprint(crypto_pk_t *pk, char *fp_out)
-{
-  char digest[DIGEST_LEN], hashed_digest[DIGEST_LEN];
-  if (crypto_pk_get_digest(pk, digest)) {
-    return -1;
-  }
-  if (crypto_digest(hashed_digest, digest, DIGEST_LEN)) {
-    return -1;
-  }
-  base16_encode(fp_out, FINGERPRINT_LEN + 1, hashed_digest, DIGEST_LEN);
-  return 0;
-}
-
 /* symmetric crypto */
 
 /** Return a pointer to the key set for the cipher in <b>env</b>.
@@ -1592,7 +1519,7 @@ struct crypto_digest_t {
     SHA256_CTX sha2; /**< state for SHA256 */
   } d; /**< State for the digest we're using.  Only one member of the
         * union is usable, depending on the value of <b>algorithm</b>. */
-  digest_algorithm_bitfield_t algorithm : 8; /**< Which algorithm is in use? */
+  ENUM_BF(digest_algorithm_t) algorithm : 8; /**< Which algorithm is in use? */
 };
 
 /** Allocate and return a new digest object to compute SHA1 digests.
@@ -2469,7 +2396,6 @@ crypto_strongest_rand(uint8_t *out, size_t out_len)
   return 0;
 #else
   for (i = 0; filenames[i]; ++i) {
-    log_debug(LD_FS, "Opening %s for entropy", filenames[i]);
     fd = open(sandbox_intern_string(filenames[i]), O_RDONLY, 0);
     if (fd<0) continue;
     log_info(LD_CRYPTO, "Reading entropy from \"%s\"", filenames[i]);
@@ -3088,6 +3014,8 @@ memwipe(void *mem, uint8_t byte, size_t sz)
   memset(mem, byte, sz);
 }
 
+#ifdef TOR_IS_MULTITHREADED
+
 #ifndef OPENSSL_THREADS
 #error OpenSSL has been built without thread support. Tor requires an \
  OpenSSL library with thread support enabled.
@@ -3100,7 +3028,7 @@ openssl_locking_cb_(int mode, int n, const char *file, int line)
   (void)file;
   (void)line;
   if (!openssl_mutexes_)
-    /* This is not a really good fix for the
+    /* This is not a really good  fix for the
      * "release-freed-lock-from-separate-thread-on-shutdown" problem, but
      * it can't hurt. */
     return;
@@ -3174,6 +3102,13 @@ setup_openssl_threading(void)
   CRYPTO_set_dynlock_destroy_callback(openssl_dynlock_destroy_cb_);
   return 0;
 }
+#else
+static int
+setup_openssl_threading(void)
+{
+  return 0;
+}
+#endif
 
 /** Uninitialize the crypto library. Return 0 on success, -1 on failure.
  */
@@ -3197,7 +3132,7 @@ crypto_global_cleanup(void)
 
   CONF_modules_unload(1);
   CRYPTO_cleanup_all_ex_data();
-
+#ifdef TOR_IS_MULTITHREADED
   if (n_openssl_mutexes_) {
     int n = n_openssl_mutexes_;
     tor_mutex_t **ms = openssl_mutexes_;
@@ -3209,7 +3144,7 @@ crypto_global_cleanup(void)
     }
     tor_free(ms);
   }
-
+#endif
   tor_free(crypto_openssl_version_str);
   tor_free(crypto_openssl_header_version_str);
   return 0;

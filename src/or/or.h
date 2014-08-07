@@ -42,6 +42,9 @@
 #include <sys/param.h> /* FreeBSD needs this to know what version it is */
 #endif
 #include "torint.h"
+#ifdef HAVE_SYS_WAIT_H
+#include <sys/wait.h>
+#endif
 #ifdef HAVE_SYS_FCNTL_H
 #include <sys/fcntl.h>
 #endif
@@ -193,7 +196,6 @@ typedef enum {
    * and let it use any circuit ID it wants. */
   CIRC_ID_TYPE_NEITHER=2
 } circ_id_type_t;
-#define circ_id_type_bitfield_t ENUM_BF(circ_id_type_t)
 
 #define CONN_TYPE_MIN_ 3
 /** Type for sockets listening for OR connections. */
@@ -398,10 +400,13 @@ typedef enum {
 #define CONTROL_CONN_STATE_NEEDAUTH 2
 #define CONTROL_CONN_STATE_MAX_ 2
 
-#define DIR_PURPOSE_MIN_ 4
-/** A connection to a directory server: set after a v2 rendezvous
+#define DIR_PURPOSE_MIN_ 3
+/** A connection to a directory server: download a rendezvous
+ * descriptor. */
+#define DIR_PURPOSE_FETCH_RENDDESC 3
+/** A connection to a directory server: set after a rendezvous
  * descriptor is downloaded. */
-#define DIR_PURPOSE_HAS_FETCHED_RENDDESC_V2 4
+#define DIR_PURPOSE_HAS_FETCHED_RENDDESC 4
 /** A connection to a directory server: download one or more server
  * descriptors. */
 #define DIR_PURPOSE_FETCH_SERVERDESC 6
@@ -410,6 +415,9 @@ typedef enum {
 #define DIR_PURPOSE_FETCH_EXTRAINFO 7
 /** A connection to a directory server: upload a server descriptor. */
 #define DIR_PURPOSE_UPLOAD_DIR 8
+/** A connection to a directory server: upload a rendezvous
+ * descriptor. */
+#define DIR_PURPOSE_UPLOAD_RENDDESC 9
 /** A connection to a directory server: upload a v3 networkstatus vote. */
 #define DIR_PURPOSE_UPLOAD_VOTE 10
 /** A connection to a directory server: upload a v3 consensus signature */
@@ -443,6 +451,7 @@ typedef enum {
  * directory server. */
 #define DIR_PURPOSE_IS_UPLOAD(p)                \
   ((p)==DIR_PURPOSE_UPLOAD_DIR ||               \
+   (p)==DIR_PURPOSE_UPLOAD_RENDDESC ||          \
    (p)==DIR_PURPOSE_UPLOAD_VOTE ||              \
    (p)==DIR_PURPOSE_UPLOAD_SIGNATURES)
 
@@ -601,8 +610,7 @@ typedef enum {
 #define END_OR_CONN_REASON_NO_ROUTE       6 /* no route to host/net */
 #define END_OR_CONN_REASON_IO_ERROR       7 /* read/write error */
 #define END_OR_CONN_REASON_RESOURCE_LIMIT 8 /* sockets, buffers, etc */
-#define END_OR_CONN_REASON_PT_MISSING     9 /* PT failed or not available */
-#define END_OR_CONN_REASON_MISC           10
+#define END_OR_CONN_REASON_MISC           9
 
 /* Reasons why we (or a remote OR) might close a stream. See tor-spec.txt for
  * documentation of these.  The values must match. */
@@ -1479,20 +1487,15 @@ typedef struct or_connection_t {
   unsigned int is_outgoing:1;
   unsigned int proxy_type:2; /**< One of PROXY_NONE...PROXY_SOCKS5 */
   unsigned int wide_circ_ids:1;
-  /** True iff this connection has had its bootstrap failure logged with
-   * control_event_bootstrap_problem. */
-  unsigned int have_noted_bootstrap_problem:1;
-
   uint16_t link_proto; /**< What protocol version are we using? 0 for
                         * "none negotiated yet." */
-  uint16_t idle_timeout; /**< How long can this connection sit with no
-                          * circuits on it before we close it? Based on
-                          * IDLE_CIRCUIT_TIMEOUT_{NON,}CANONICAL and
-                          * on is_canonical, randomized. */
+
   or_handshake_state_t *handshake_state; /**< If we are setting this connection
                                           * up, state information to do so. */
 
   time_t timestamp_lastempty; /**< When was the outbuf last completely empty?*/
+  time_t timestamp_last_added_nonpadding; /** When did we last add a
+                                           * non-padding cell to the outbuf? */
 
   /* bandwidth* and *_bucket only used by ORs in OPEN state: */
   int bandwidthrate; /**< Bytes/s added to the bucket. (OPEN ORs only.) */
@@ -1687,7 +1690,6 @@ typedef enum {
     DIR_SPOOL_CACHED_DIR, DIR_SPOOL_NETWORKSTATUS,
     DIR_SPOOL_MICRODESC, /* NOTE: if we add another entry, add another bit. */
 } dir_spool_source_t;
-#define dir_spool_source_bitfield_t ENUM_BF(dir_spool_source_t)
 
 /** Subtype of connection_t for an "directory connection" -- that is, an HTTP
  * connection to retrieve or serve directory material. */
@@ -1707,7 +1709,7 @@ typedef struct dir_connection_t {
    * "spooling" of directory material to the outbuf.  Otherwise, we'd have
    * to append everything to the outbuf in one enormous chunk. */
   /** What exactly are we spooling right now? */
-  dir_spool_source_bitfield_t  dir_spool_src : 3;
+  ENUM_BF(dir_spool_source_t)  dir_spool_src : 3;
 
   /** If we're fetching descriptors, what router purpose shall we assign
    * to them? */
@@ -1880,13 +1882,12 @@ typedef enum {
   ADDR_POLICY_ACCEPT=1,
   ADDR_POLICY_REJECT=2,
 } addr_policy_action_t;
-#define addr_policy_action_bitfield_t ENUM_BF(addr_policy_action_t)
 
 /** A reference-counted address policy rule. */
 typedef struct addr_policy_t {
   int refcnt; /**< Reference count */
   /** What to do when the policy matches.*/
-  addr_policy_action_bitfield_t policy_type:2;
+  ENUM_BF(addr_policy_action_t) policy_type:2;
   unsigned int is_private:1; /**< True iff this is the pseudo-address,
                               * "private". */
   unsigned int is_canonical:1; /**< True iff this policy is the canonical
@@ -1938,7 +1939,6 @@ typedef enum {
    */
   SAVED_IN_JOURNAL
 } saved_location_t;
-#define saved_location_bitfield_t ENUM_BF(saved_location_t)
 
 /** Enumeration: what kind of download schedule are we using for a given
  * object? */
@@ -1947,7 +1947,6 @@ typedef enum {
   DL_SCHED_CONSENSUS = 1,
   DL_SCHED_BRIDGE = 2,
 } download_schedule_t;
-#define download_schedule_bitfield_t ENUM_BF(download_schedule_t)
 
 /** Information about our plans for retrying downloads for a downloadable
  * object. */
@@ -1956,7 +1955,7 @@ typedef struct download_status_t {
                            * again? */
   uint8_t n_download_failures; /**< Number of failures trying to download the
                                 * most recent descriptor. */
-  download_schedule_bitfield_t schedule : 8;
+  ENUM_BF(download_schedule_t) schedule : 8;
 } download_status_t;
 
 /** If n_download_failures is this high, the download can never happen. */
@@ -2017,6 +2016,7 @@ typedef int16_t country_t;
 /** Information about another onion router in the network. */
 typedef struct {
   signed_descriptor_t cache_info;
+  char *address; /**< Location of OR: either a hostname or an IP address. */
   char *nickname; /**< Human-readable OR name. */
 
   uint32_t addr; /**< IPv4 address of OR, in host order. */
@@ -2211,7 +2211,7 @@ typedef struct microdesc_t {
    */
   time_t last_listed;
   /** Where is this microdescriptor currently stored? */
-  saved_location_bitfield_t saved_location : 3;
+  ENUM_BF(saved_location_t) saved_location : 3;
   /** If true, do not attempt to cache this microdescriptor on disk. */
   unsigned int no_save : 1;
   /** If true, this microdesc has an entry in the microdesc_map */
@@ -2421,8 +2421,8 @@ typedef enum {
 /** A common structure to hold a v3 network status vote, or a v3 network
  * status consensus. */
 typedef struct networkstatus_t {
-  networkstatus_type_t type; /**< Vote, consensus, or opinion? */
-  consensus_flavor_t flavor; /**< If a consensus, what kind? */
+  ENUM_BF(networkstatus_type_t) type : 8; /**< Vote, consensus, or opinion? */
+  ENUM_BF(consensus_flavor_t) flavor : 8; /**< If a consensus, what kind? */
   unsigned int has_measured_bws : 1;/**< True iff this networkstatus contains
                                      * measured= bandwidth values. */
 
@@ -2594,8 +2594,13 @@ typedef struct authority_cert_t {
  */
 typedef enum {
   NO_DIRINFO      = 0,
+  /** Serves/signs v1 directory information: Big lists of routers, and short
+   * routerstatus documents. */
+  V1_DIRINFO      = 1 << 0,
   /** Serves/signs v3 directory information: votes, consensuses, certs */
   V3_DIRINFO      = 1 << 2,
+  /** Serves hidden service descriptors. */
+  HIDSERV_DIRINFO = 1 << 3,
   /** Serves bridge descriptors. */
   BRIDGE_DIRINFO  = 1 << 4,
   /** Serves extrainfo documents. */
@@ -2784,6 +2789,13 @@ typedef struct circuit_t {
   /** Queue of cells waiting to be transmitted on n_chan */
   cell_queue_t n_chan_cells;
 
+  /** CLIENTLOGGING:
+   *  A pseudonym for this circuit.  This is used for the client logging
+   *  code.  Pseudonyms are unique across all circuits during a
+   *  single client logging session.
+   */
+  uint64_t cllog_circ_id ;
+
   /**
    * The hop to which we want to extend this circuit.  Should be NULL if
    * the circuit has attached to a channel.
@@ -2819,9 +2831,6 @@ typedef struct circuit_t {
    * circuit-level sendme cells to indicate that we're willing to accept
    * more. */
   int deliver_window;
-
-  /** Temporary field used during circuits_handle_oom. */
-  uint32_t age_tmp;
 
   /** For storage while n_chan is pending (state CIRCUIT_STATE_CHAN_WAIT). */
   struct create_cell_t *n_chan_create_cell;
@@ -2941,7 +2950,6 @@ typedef enum {
      */
     PATH_STATE_ALREADY_COUNTED = 6,
 } path_state_t;
-#define path_state_bitfield_t ENUM_BF(path_state_t)
 
 /** An origin_circuit_t holds data necessary to build and use a circuit.
  */
@@ -2992,7 +3000,7 @@ typedef struct origin_circuit_t {
    * circuit building and usage accounting. See path_state_t
    * for more details.
    */
-  path_state_bitfield_t path_state : 3;
+  ENUM_BF(path_state_t) path_state : 3;
 
   /* If this flag is set, we should not consider attaching any more
    * connections to this circuit. */
@@ -3176,8 +3184,20 @@ typedef struct or_circuit_t {
    * is not marked for close. */
   struct or_circuit_t *rend_splice;
 
-  struct or_circuit_rendinfo_s *rendinfo;
+#if REND_COOKIE_LEN >= DIGEST_LEN
+#define REND_TOKEN_LEN REND_COOKIE_LEN
+#else
+#define REND_TOKEN_LEN DIGEST_LEN
+#endif
 
+  /** A hash of location-hidden service's PK if purpose is INTRO_POINT, or a
+   * rendezvous cookie if purpose is REND_POINT_WAITING. Filled with zeroes
+   * otherwise.
+   * ???? move to a subtype or adjunct structure? Wastes 20 bytes. -NM
+   */
+  char rend_token[REND_TOKEN_LEN];
+
+  /* ???? move to a subtype or adjunct structure? Wastes 20 bytes -NM */
   /** Stores KH for the handshake. */
   char rend_circ_nonce[DIGEST_LEN];/* KH in tor-spec.txt */
 
@@ -3204,54 +3224,22 @@ typedef struct or_circuit_t {
   uint32_t max_middle_cells;
 } or_circuit_t;
 
-typedef struct or_circuit_rendinfo_s {
-
-#if REND_COOKIE_LEN != DIGEST_LEN
-#error "The REND_TOKEN_LEN macro assumes REND_COOKIE_LEN == DIGEST_LEN"
-#endif
-#define REND_TOKEN_LEN DIGEST_LEN
-
-  /** A hash of location-hidden service's PK if purpose is INTRO_POINT, or a
-   * rendezvous cookie if purpose is REND_POINT_WAITING. Filled with zeroes
-   * otherwise.
-   */
-  char rend_token[REND_TOKEN_LEN];
-
-  /** True if this is a rendezvous point circuit; false if this is an
-   * introduction point. */
-  unsigned is_rend_circ;
-
-} or_circuit_rendinfo_t;
-
 /** Convert a circuit subtype to a circuit_t. */
 #define TO_CIRCUIT(x)  (&((x)->base_))
 
 /** Convert a circuit_t* to a pointer to the enclosing or_circuit_t.  Assert
  * if the cast is impossible. */
 static or_circuit_t *TO_OR_CIRCUIT(circuit_t *);
-static const or_circuit_t *CONST_TO_OR_CIRCUIT(const circuit_t *);
 /** Convert a circuit_t* to a pointer to the enclosing origin_circuit_t.
  * Assert if the cast is impossible. */
 static origin_circuit_t *TO_ORIGIN_CIRCUIT(circuit_t *);
-static const origin_circuit_t *CONST_TO_ORIGIN_CIRCUIT(const circuit_t *);
 
 static INLINE or_circuit_t *TO_OR_CIRCUIT(circuit_t *x)
 {
   tor_assert(x->magic == OR_CIRCUIT_MAGIC);
   return DOWNCAST(or_circuit_t, x);
 }
-static INLINE const or_circuit_t *CONST_TO_OR_CIRCUIT(const circuit_t *x)
-{
-  tor_assert(x->magic == OR_CIRCUIT_MAGIC);
-  return DOWNCAST(or_circuit_t, x);
-}
 static INLINE origin_circuit_t *TO_ORIGIN_CIRCUIT(circuit_t *x)
-{
-  tor_assert(x->magic == ORIGIN_CIRCUIT_MAGIC);
-  return DOWNCAST(origin_circuit_t, x);
-}
-static INLINE const origin_circuit_t *CONST_TO_ORIGIN_CIRCUIT(
-    const circuit_t *x)
 {
   tor_assert(x->magic == ORIGIN_CIRCUIT_MAGIC);
   return DOWNCAST(origin_circuit_t, x);
@@ -3484,12 +3472,7 @@ typedef struct {
   const char *TransProxyType; /**< What kind of transparent proxy
                                * implementation are we using? */
   /** Parsed value of TransProxyType. */
-  enum {
-    TPT_DEFAULT,
-    TPT_PF_DIVERT,
-    TPT_IPFW,
-    TPT_TPROXY,
-  } TransProxyType_parsed;
+  enum { TPT_DEFAULT, TPT_TPROXY } TransProxyType_parsed;
   config_line_t *NATDPort_lines; /**< Ports to listen on for transparent natd
                             * connections. */
   config_line_t *ControlPort_lines; /**< Ports to listen on for control
@@ -3502,11 +3485,9 @@ typedef struct {
   config_line_t *DirPort_lines;
   config_line_t *DNSPort_lines; /**< Ports to listen on for DNS requests. */
 
-  /* MaxMemInQueues value as input by the user. We clean this up to be
-   * MaxMemInQueues. */
-  uint64_t MaxMemInQueues_raw;
-  uint64_t MaxMemInQueues;/**< If we have more memory than this allocated
-                            * for queues and buffers, run the OOM handler */
+  uint64_t MaxMemInCellQueues; /**< If we have more memory than this allocated
+                                * for circuit cell queues, run the OOM handler
+                                */
 
   /** @name port booleans
    *
@@ -3528,6 +3509,8 @@ typedef struct {
 
   int AssumeReachable; /**< Whether to publish our descriptor regardless. */
   int AuthoritativeDir; /**< Boolean: is this an authoritative directory? */
+  int V1AuthoritativeDir; /**< Boolean: is this an authoritative directory
+                           * for version 1 directories? */
   int V3AuthoritativeDir; /**< Boolean: is this an authoritative directory
                            * for version 3 directories? */
   int NamingAuthoritativeDir; /**< Boolean: is this an authoritative directory
@@ -3670,10 +3653,6 @@ typedef struct {
                          * a new one? */
   int MaxCircuitDirtiness; /**< Never use circs that were first used more than
                                 this interval ago. */
-  int PredictedPortsRelevanceTime; /** How long after we've requested a
-                                    * connection for a given port, do we want
-                                    * to continue to pick exits that support
-                                    * that port?  */
   uint64_t BandwidthRate; /**< How much bandwidth, on average, are we willing
                            * to use in a second? */
   uint64_t BandwidthBurst; /**< How much bandwidth, at maximum, are we willing
@@ -3884,6 +3863,10 @@ typedef struct {
                                         * testing our DNS server. */
   int EnforceDistinctSubnets; /**< If true, don't allow multiple routers in the
                                * same network zone in the same circuit. */
+  int TunnelDirConns; /**< If true, use BEGIN_DIR rather than BEGIN when
+                       * possible. */
+  int PreferTunneledDirConns; /**< If true, avoid dirservers that don't
+                               * support BEGIN_DIR, when possible. */
   int PortForwarding; /**< If true, use NAT-PMP or UPnP to automatically
                        * forward the DirPort and ORPort on the NAT device */
   char *PortForwardingHelper; /** < Filename or full path of the port
@@ -3896,6 +3879,11 @@ typedef struct {
   /** If true, we try to download extra-info documents (and we serve them,
    * if we are a cache).  For authorities, this is always true. */
   int DownloadExtraInfo;
+
+  /** CLIENTLOGGING:
+   *  If true, turn on clientlogging.
+   */
+  int AllowClientLogging;
 
   /** If true, and we are acting as a relay, allow exit circuits even when
    * we are the first hop of a circuit. */
@@ -4511,7 +4499,6 @@ typedef enum {
    * did this remapping happen." */
   ADDRMAPSRC_NONE
 } addressmap_entry_source_t;
-#define addressmap_entry_source_bitfield_t ENUM_BF(addressmap_entry_source_t)
 
 /********************************* control.c ***************************/
 
@@ -4870,9 +4857,9 @@ typedef struct rend_service_descriptor_t {
   crypto_pk_t *pk; /**< This service's public key. */
   int version; /**< Version of the descriptor format: 0 or 2. */
   time_t timestamp; /**< Time when the descriptor was generated. */
-  /** Bitmask: which introduce/rendezvous protocols are supported?
-   * (We allow bits '0', '1', '2' and '3' to be set.) */
-  unsigned protocols : REND_PROTOCOL_VERSION_BITMASK_WIDTH;
+  /** Bitmask: which rendezvous protocols are supported?
+   * (We allow bits '0', '1', and '2' to be set.) */
+  int protocols : REND_PROTOCOL_VERSION_BITMASK_WIDTH;
   /** List of the service's introduction points.  Elements are removed if
    * introduction attempts fail. */
   smartlist_t *intro_nodes;
@@ -4967,6 +4954,8 @@ typedef struct dir_server_t {
 /** This node is to be chosen as a directory guard, so don't choose any
  * node that's currently a guard. */
 #define PDS_FOR_GUARD (1<<5)
+
+#define PDS_PREFER_TUNNELED_DIR_CONNS_ (1<<16)
 
 /** Possible ways to weight routers when choosing one randomly.  See
  * routerlist_sl_choose_by_bandwidth() for more information.*/
